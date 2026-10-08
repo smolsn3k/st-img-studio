@@ -92,3 +92,23 @@
 .is-pickitem{cursor:pointer;font-size:11px;text-align:center;border:1px solid var(--SmartThemeBorderColor,#555);border-radius:8px;overflow:hidden}
 .is-lb .is-pickgrid img{max-height:none;margin:0;object-fit:cover;aspect-ratio:1;width:100%;border-radius:0}
 .is-pickitem div{padding:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* named reference rows + chips */
+.is-slotrow{display:flex;gap:8px;align-items:center;margin:6px 0}
+.is-slotrow>img{width:52px;height:52px;object-fit:cover;border-radius:8px;flex:none}
+.is-slotf{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.is-slotf .is-tag{font-size:11px;opacity:.7}
+.is-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0}
+.is-chip{min-height:36px;padding:6px 14px;border-radius:18px;cursor:pointer;font-size:14px;color:inherit;border:1px solid var(--SmartThemeBorderColor,#555);background:rgba(255,255,255,.07)}
+.is-chip.used{border-color:var(--SmartThemeQuoteColor,#8ab4f8)}
+
+/* character rows, text refs, drag */
+.is-slotrow{align-items:flex-start}
+.is-slotrow>img.dim,.is-slotrow>.is-noimg.dim{opacity:.5}
+.is-noimg{width:52px;height:52px;flex:none;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600;border:1px dashed var(--SmartThemeBorderColor,#555);opacity:.7}
+.is-ref>.is-noimg{width:76px;height:76px}
+.is-slotf select{min-height:36px;font-size:14px!important}
+.is-slotd summary{font-size:12px;opacity:.75;cursor:pointer;margin:4px 0}
+.is-slotd textarea{min-height:56px!important;margin-top:4px}
+.is-pickitem .is-noimg{width:100%;height:auto;aspect-ratio:1;border-radius:0;font-size:22px}
+@media (min-width:701px){.is-head{cursor:move;touch-action:none}.is-head button,.is-head input{cursor:pointer}}
