@@ -11,7 +11,7 @@
   const toast = (type, msg) => { try { window.toastr?.[type](msg, 'Image Studio'); } catch { console.log(msg); } };
 
   const DEFAULTS = {
-    provider: 'sillyimages', siProfile: '', siAspect: '', refSlots: [], useRefs: true,
+    engine: 'sillyimages', api: 'gemini', profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true,
     gemini: { endpoint: 'https://generativelanguage.googleapis.com', key: '', model: 'gemini-2.5-flash-image', aspect: '2:3', size: '1K' },
     novelai: { model: 'nai-diffusion-4-5-full', sampler: 'k_euler_ancestral', scheduler: 'karras', steps: 28, scale: 5, width: 832, height: 1216, seed: -1, decrisper: false, variety: false },
     prompt: '1girl, {style}, {quality}',
@@ -24,12 +24,21 @@
   };
 
   const fill = (t, d) => { for (const k in d) { if (t[k] === undefined) t[k] = structuredClone(d[k]); else if (d[k] && typeof d[k] === 'object' && !Array.isArray(d[k])) fill(t[k], d[k]); } return t; };
-  const S = () => { const es = ctx().extensionSettings; es[MODULE] = es[MODULE] || {}; return fill(es[MODULE], DEFAULTS); };
+  const S = () => {
+    const es = ctx().extensionSettings, o = es[MODULE] = es[MODULE] || {};
+    if (o.provider !== undefined) { // migrate 1.x settings
+      o.engine = o.provider === 'sillyimages' ? 'sillyimages' : 'standalone'; o.api = o.provider === 'novelai' ? 'novelai' : 'gemini';
+      if (o.siProfile) o.profiles = { sillyimages: o.siProfile };
+      if (o.siAspect !== undefined) o.aspectOverride = o.siAspect;
+      delete o.provider; delete o.siProfile; delete o.siAspect;
+    }
+    return fill(o, DEFAULTS);
+  };
   const save = () => ctx().saveSettingsDebounced();
   const getPath = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
   const setPath = (o, p, v) => { const ks = p.split('.'); const l = ks.pop(); ks.reduce((a, k) => a[k], o)[l] = v; };
 
-  const state = { last: null, busy: false, abort: null, libFilter: '', lbId: null, refs: [], refsLoaded: false, toSlot: false, refT: {} };
+  const state = { last: null, busy: false, abort: null, libFilter: '', lbId: null, refs: [], refsLoaded: false, toSlot: false, refT: {}, modelCache: {} };
 
   /* ---------- IndexedDB library ---------- */
   const DB = 'image_studio_lib', STORE = 'items';
@@ -174,11 +183,11 @@
     syncVars();
     const prompt = resolve(s.prompt), neg = resolve(s.negative);
     if (!prompt) return toast('warning', 'Main prompt is empty.');
-    if (s.provider === 'novelai' && s.useRefs && s.refSlots.length) toast('info', 'NovelAI ignores reference images.');
+    if (s.engine === 'standalone' && s.api === 'novelai' && s.useRefs && s.refSlots.length) toast('info', 'NovelAI ignores reference images.');
     state.busy = true; state.abort = new AbortController(); renderResult();
     try {
       const sig = state.abort.signal;
-      const url = s.provider === 'novelai' ? await genNovelAI(prompt, neg, sig) : s.provider === 'gemini' ? await genGemini(prompt, neg, sig) : await genSillyimages(prompt, neg, sig);
+      const url = s.engine !== 'standalone' ? await genExt(prompt, neg, sig) : s.api === 'novelai' ? await genNovelAI(prompt, neg, sig) : await genGemini(prompt, neg, sig);
       state.last = { url, prompt, neg, saved: false };
       if (s.autosave) await saveLast(true);
     } catch (e) {
@@ -193,7 +202,7 @@
     await libPut({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(),
       image: l.url, thumb: await makeThumb(l.url), template: s.prompt, negative: s.negative, vars,
-      resolved: l.prompt, resolvedNeg: l.neg, refIds: s.useRefs ? [...s.refSlots] : [], provider: s.provider,
+      resolved: l.prompt, resolvedNeg: l.neg, refIds: s.useRefs ? [...s.refSlots] : [], engine: s.engine, api: s.api, profile: s.profiles[s.engine] || '', modelRaw: rawModel(),
       model: modelLabel(),
     });
     l.saved = true; renderResult(); if (!quiet) toast('success', 'Saved to library.');
@@ -201,65 +210,106 @@
   }
 
 
-  /* ---------- sillyimages integration (reuses its providers + connection profiles) ---------- */
-  let siCache;
-  async function loadSI(force = false) {
-    if (siCache !== undefined && !force) return siCache;
-    siCache = null;
+  /* ---------- Generator extensions (engine) → connection profile → model ---------- */
+  const EXTS = { sillyimages: { label: 'sillyimages', match: m => /sillyimages/i.test(m.homePage || '') || m.display_name === 'Inline Image Generation' } };
+  const GEMINI_MODELS = ['gemini-2.5-flash-image', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview'];
+  const NAISTERA_MODELS = ['nano banana', 'nano banana pro', 'nano banana 2', 'grok'];
+  const NAI_MODELS = ['nai-diffusion-4-5-full', 'nai-diffusion-4-5-curated', 'nai-diffusion-4-full'];
+  const extCache = {}; let discovered;
+  async function loadExt(id, force = false) {
+    if (force) { discovered = undefined; delete extCache[id]; }
+    if (extCache[id] !== undefined) return extCache[id];
+    extCache[id] = null;
     try {
-      const list = await (await fetch('/api/extensions/discover')).json();
-      for (const e of list) {
+      discovered = discovered || await (await fetch('/api/extensions/discover')).json();
+      for (const e of discovered) {
         if (!e?.name || e.type === 'system') continue;
         const base = `/scripts/extensions/${e.name}`;
         let m; try { m = await (await fetch(`${base}/manifest.json`)).json(); } catch { continue; }
-        if (!/sillyimages/i.test(m.homePage || '') && m.display_name !== 'Inline Image Generation') continue;
+        if (!EXTS[id].match(m)) continue;
         const [prov, set] = await Promise.all([import(/* @vite-ignore */ `${base}/src/providers.js`), import(/* @vite-ignore */ `${base}/src/settings.js`)]);
-        if (prov.resolveActiveProvider && set.getSettings) { siCache = { prov, set, name: e.name }; break; }
+        let nai = null; try { nai = await import(/* @vite-ignore */ `${base}/src/novelai.js`); } catch { /* optional */ }
+        if (prov.resolveActiveProvider && set.getSettings) { extCache[id] = { id, prov, set, nai, name: e.name }; break; }
       }
-    } catch (e) { console.warn('[Image Studio] sillyimages lookup failed', e); }
-    return siCache;
+    } catch (e) { console.warn('[Image Studio] extension lookup failed', id, e); }
+    return extCache[id];
+  }
+  const loadSI = (force) => loadExt('sillyimages', force);
+  const mkey = () => { const s = S(); return `${s.engine}:${s.profiles[s.engine] || ''}`; };
+  const getProfile = (ext, st) => (st.connectionProfiles || []).find(p => p.id === S().profiles[ext.id]);
+
+  // Temporarily load the chosen profile (connection) + Studio's own model into the extension's live settings. Returns a restore fn.
+  function applyConn(ext, st, modelOverride) {
+    const backup = ext.set.extractConnectionFields(st), profile = getProfile(ext, st);
+    if (profile) for (const k of ext.set.CONNECTION_FIELDS) if (k in profile) st[k] = profile[k];
+    const m = String(modelOverride ?? S().models[mkey()] ?? '').trim();
+    if (m) { if (st.apiType === 'naistera') st.naisteraModel = m; else st.model = m; }
+    return () => Object.assign(st, backup);
   }
 
-  async function genSillyimages(prompt, neg, signal) {
-    const si = await loadSI();
-    if (!si) throw new Error('sillyimages extension not found. Install it, or switch to a standalone model.');
-    const st = si.set.getSettings();
-    const profile = (st.connectionProfiles || []).find(p => p.id === S().siProfile);
-    const backup = si.set.extractConnectionFields(st);
+  async function genExt(prompt, neg, signal) {
+    const s = S(), ext = await loadExt(s.engine);
+    if (!ext) throw new Error(`${EXTS[s.engine]?.label || 'Generator extension'} not found. Install it or switch to Standalone.`);
+    const st = ext.set.getSettings(), restore = applyConn(ext, st);
     try {
-      // Temporarily load the chosen connection profile, then restore (nothing is saved).
-      if (profile) for (const k of si.set.CONNECTION_FIELDS) if (k in profile) st[k] = profile[k];
-      const provider = si.prov.resolveActiveProvider(st);
-      if (!provider) throw new Error(`Unknown sillyimages API type: ${st.apiType}`);
+      const provider = ext.prov.resolveActiveProvider(st);
+      if (!provider) throw new Error(`Unknown API type in profile: ${st.apiType}`);
       const errs = provider.validate(st);
       if (errs.length) throw new Error(errs.join('; '));
       const text = neg && !provider.supportsNegativePrompt(st) ? `${prompt}\n\nAvoid: ${neg}` : prompt;
       let references = [];
-      if (S().useRefs && S().refSlots.length) {
-        const max = Math.min(MAX_REFS, si.prov.getActiveProviderMaxReferences?.(st) || 0);
+      if (s.useRefs && s.refSlots.length) {
+        const max = Math.min(MAX_REFS, ext.prov.getActiveProviderMaxReferences?.(st) || 0);
         if (max > 0 && provider.supportsReferences(st)) references = await buildRefs(provider.capabilities?.referencesFormat === 'dataUrl' ? 'dataUrl' : 'base64', max);
         else toast('info', 'This model does not accept reference images, so they were skipped.');
       }
       const options = { signal, negativePrompt: neg, matchedAdditionalRefs: [], characterDescriptionPromptBlock: '' };
-      if (S().siAspect) options.aspectRatio = S().siAspect;
+      if (s.aspectOverride) options.aspectRatio = s.aspectOverride;
       const out = await provider.generate({ prompt: text, style: '', references, options });
       if (typeof out !== 'string') throw new Error('Provider returned a video/non-image result.');
       return out;
-    } finally { Object.assign(st, backup); }
+    } finally { restore(); }
   }
 
-  async function renderSI() {
-    const sel = $('#is_siprof'); if (!sel) return;
-    const si = await loadSI(), hint = $('#is_sihint'), s = S();
-    if (!si) { sel.innerHTML = '<option value="">sillyimages not found</option>'; hint.textContent = 'sillyimages is not installed or could not be loaded. Use a standalone model instead.'; return; }
-    const ps = si.set.getSettings().connectionProfiles || [];
-    sel.innerHTML = ps.map(p => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.apiType)} · ${esc(p.model || '?')}</option>`).join('') || '<option value="">No profiles</option>';
-    if (!ps.some(p => p.id === s.siProfile)) { s.siProfile = si.set.getSettings().activeConnectionProfileId || ps[0]?.id || ''; save(); }
-    sel.value = s.siProfile;
-    hint.textContent = 'Uses the endpoint, key and model from this sillyimages profile. Make one profile per model (e.g. “Nano Banana”, “NovelAI 4.5”) in sillyimages settings.';
+  async function fetchProfileModels() {
+    const s = S(), ext = await loadExt(s.engine); if (!ext) return;
+    const st = ext.set.getSettings(), restore = applyConn(ext, st, '');
+    try { const list = await ext.prov.resolveActiveProvider(st).fetchModels(); state.modelCache[mkey()] = list; toast('success', `${list.length} model(s) found.`); }
+    catch (e) { toast('error', 'Could not fetch models: ' + (e.message || e)); } finally { restore(); }
+    renderConn();
   }
 
-  const modelLabel = () => { const s = S(); if (s.provider === 'novelai') return s.novelai.model; if (s.provider === 'gemini') return s.gemini.model; return $('#is_siprof')?.selectedOptions?.[0]?.textContent || 'sillyimages'; };
+  const rawModel = () => { const s = S(); return s.engine === 'standalone' ? s[s.api].model : (s.models[mkey()] || ''); };
+  const modelLabel = () => { const s = S(), m = rawModel(); const c = $('#is_conn')?.selectedOptions?.[0]?.textContent || s.engine; return `${c} · ${m || 'profile model'}`; };
+
+  async function renderConn() {
+    const eng = $('#is_engine'); if (!eng) return;
+    const s = S(), ids = Object.keys(EXTS);
+    await Promise.all(ids.map(id => loadExt(id)));
+    eng.innerHTML = ids.map(id => `<option value="${id}">${EXTS[id].label}${extCache[id] ? '' : ' (not found)'}</option>`).join('') + '<option value="standalone">Standalone (own connection)</option>';
+    eng.value = s.engine;
+    const conn = $('#is_conn'), model = $('#is_model'), hint = $('#is_sihint'); let sugg = [];
+    if (s.engine === 'standalone') {
+      conn.innerHTML = '<option value="gemini">Gemini / nano banana proxy</option><option value="novelai">NovelAI (SillyTavern key)</option>';
+      conn.value = s.api; model.value = s[s.api].model; model.placeholder = '';
+      sugg = s.api === 'novelai' ? NAI_MODELS : GEMINI_MODELS;
+      hint.textContent = 'Standalone uses the endpoint and key from the Setup tab.';
+    } else {
+      const ext = extCache[s.engine];
+      if (!ext) { conn.innerHTML = '<option value="">Extension not found</option>'; model.value = ''; hint.textContent = `${EXTS[s.engine].label} is not installed or could not be loaded. Pick Standalone instead.`; return; }
+      const st = ext.set.getSettings(), ps = st.connectionProfiles || [];
+      conn.innerHTML = ps.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.apiType)})</option>`).join('') || '<option value="">No profiles</option>';
+      if (!ps.some(p => p.id === s.profiles[s.engine])) { s.profiles[s.engine] = st.activeConnectionProfileId || ps[0]?.id || ''; save(); }
+      conn.value = s.profiles[s.engine];
+      const prof = ps.find(p => p.id === conn.value), t = prof?.apiType;
+      model.value = s.models[mkey()] || '';
+      model.placeholder = `Profile's model: ${(t === 'naistera' ? prof?.naisteraModel : prof?.model) || 'not set'}`;
+      sugg = t === 'novelai' ? Object.keys(ext.nai?.NOVELAI_MODELS || {}).length ? Object.keys(ext.nai.NOVELAI_MODELS) : NAI_MODELS
+        : t === 'gemini' ? GEMINI_MODELS : t === 'naistera' ? NAISTERA_MODELS : (state.modelCache[mkey()] || []);
+      hint.textContent = 'The profile supplies endpoint, key and API type. The model here is used only by Image Studio; leave empty to use the profile’s own.';
+    }
+    $('#is_models').innerHTML = sugg.map(m => `<option value="${esc(m)}">`).join('');
+  }
 
   /* ---------- Rendering ---------- */
   function renderVars() {
@@ -298,7 +348,7 @@
     const it = (await libAll()).find(x => x.id === id); if (!it) return;
     state.lbId = id;
     $('#is_lb').innerHTML = `<img src="${it.image}" alt=""><pre>${esc(it.template)}\n\n→ ${esc(it.resolved)}</pre>
-      <div class="is-hint">${esc(it.provider)} · ${esc(it.model)} · ${new Date(it.ts).toLocaleString()}</div>
+      <div class="is-hint">${esc(it.model)} · ${new Date(it.ts).toLocaleString()}</div>
       <div class="is-row"><button class="is-btn pri full" data-act="lb-use">Use this prompt</button><button class="is-btn full" data-act="lb-dl">Download</button></div>
       <div class="is-row"><button class="is-btn full" data-act="lb-ref">Use as reference</button></div>
       <div class="is-row"><button class="is-btn full" data-act="lb-del">Delete</button><button class="is-btn full" data-act="lb-close">Close</button></div>`;
@@ -316,7 +366,7 @@
     $('#is_fab').classList.toggle('is-off', !s.showButton);
     $$('.is-tab', p).forEach(t => t.classList.toggle('on', t.dataset.tab === s.tab));
     $$('.is-sec', p).forEach(t => t.classList.toggle('on', t.dataset.tab === s.tab));
-    $$('.is-prov', p).forEach(e => e.style.display = e.dataset.prov === s.provider ? '' : 'none');
+    $$('[data-show]', p).forEach(e => { const k = e.dataset.show; const on = k === 'ext' ? s.engine !== 'standalone' : (s.engine === 'standalone' && (k === 'standalone' || s.api === k)); e.style.display = on ? '' : 'none'; });
     $$('[data-k]', p).forEach(e => { const v = getPath(s, e.dataset.k); if (e.type === 'checkbox') e.checked = !!v; else if (document.activeElement !== e) e.value = v ?? ''; });
   }
 
@@ -355,14 +405,14 @@
       <div class="is-tabs"><button class="is-tab" data-tab="create">Create</button><button class="is-tab" data-tab="library">Library</button><button class="is-tab" data-tab="refs">Refs</button><button class="is-tab" data-tab="setup">Setup</button></div>
       <div class="is-body">
         <section class="is-sec" data-tab="create">
-          <label class="is-l">Model</label>
-          <select data-k="provider"><option value="sillyimages">sillyimages connection</option><option value="gemini">Nano Banana (standalone)</option><option value="novelai">NovelAI 4.5 (standalone)</option></select>
-          <div class="is-prov" data-prov="sillyimages">
-            <label class="is-l">sillyimages profile (model)</label><select id="is_siprof" data-k="siProfile"></select>
-            <label class="is-l">Aspect ratio override (Gemini / nano banana only)</label>
-            <select data-k="siAspect"><option value="">Use profile setting</option>${opt(['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'], '')}</select>
-            <div class="is-hint" id="is_sihint"></div>
-          </div>
+          <label class="is-l">Generator extension</label><select id="is_engine" data-act="engine"></select>
+          <label class="is-l">Connection profile</label><select id="is_conn" data-act="conn"></select>
+          <label class="is-l">Model (set here, independent of the extension's own)</label>
+          <div class="is-row"><input type="text" id="is_model" data-act="model" list="is_models" autocomplete="off"><button class="is-ib" data-show="ext" data-act="model-fetch" title="Fetch models from this connection">↻</button></div>
+          <datalist id="is_models"></datalist>
+          <div data-show="ext"><label class="is-l">Aspect ratio override (Gemini / nano banana only)</label>
+            <select data-k="aspectOverride"><option value="">Use profile setting</option>${opt(['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'], '')}</select></div>
+          <div class="is-hint" id="is_sihint"></div>
           <label class="is-l">Main prompt — use {tags} for swappable parts</label>
           <textarea data-k="prompt" placeholder="1girl, {style}, standing in a forest"></textarea>
           <label class="is-l">Negative prompt</label>
@@ -388,23 +438,20 @@
           <input type="file" id="is_file" accept="image/*" multiple hidden>
         </section>
         <section class="is-sec" data-tab="setup">
-          <div class="is-prov" data-prov="sillyimages">
-            <div class="is-hint">Connection, key and model come from sillyimages, so there is nothing to enter here.</div>
-            <button class="is-btn full" data-act="si-styles">Import sillyimages styles as {style} options</button>
-            <button class="is-btn full" style="margin-top:6px" data-act="si-refresh">Re-scan sillyimages profiles</button>
+          <div data-show="ext">
+            <div class="is-hint">Endpoint, key and API type come from the extension profile you pick on the Create tab. Nothing to enter here.</div>
+            <button class="is-btn full" data-act="si-styles">Import the extension's styles as {style} options</button>
+            <button class="is-btn full" style="margin-top:6px" data-act="si-refresh">Re-scan extensions and profiles</button>
           </div>
           <label class="is-l">Copy settings from another image extension (standalone mode)</label><div id="is_import"></div>
-          <div class="is-prov" data-prov="gemini">
+          <div data-show="gemini">
             <label class="is-l">Endpoint (Google or proxy)</label><input type="text" data-k="gemini.endpoint">
             <label class="is-l">API key</label><input type="password" data-k="gemini.key" autocomplete="off">
-            <label class="is-l">Model</label><input type="text" data-k="gemini.model" list="is_gm">
-            <datalist id="is_gm"><option value="gemini-2.5-flash-image"><option value="gemini-3-pro-image-preview"></datalist>
             <div class="is-grid2"><div><label class="is-l">Aspect ratio</label><select data-k="gemini.aspect">${opt(['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'], '')}</select></div>
             <div><label class="is-l">Size (Pro models)</label><select data-k="gemini.size">${opt(['1K', '2K', '4K'], '')}</select></div></div>
           </div>
-          <div class="is-prov" data-prov="novelai">
+          <div data-show="novelai">
             <div class="is-hint">Uses the NovelAI key saved in SillyTavern (API Connections → NovelAI).</div>
-            <label class="is-l">Model</label><select data-k="novelai.model">${opt(['nai-diffusion-4-5-full', 'nai-diffusion-4-5-curated', 'nai-diffusion-4-full'], '')}</select>
             <div class="is-grid2"><div><label class="is-l">Sampler</label><select data-k="novelai.sampler">${opt(['k_euler_ancestral', 'k_euler', 'k_dpmpp_2m', 'k_dpmpp_2s_ancestral', 'k_dpmpp_sde'], '')}</select></div>
             <div><label class="is-l">Scheduler</label><select data-k="novelai.scheduler">${opt(['karras', 'native', 'exponential', 'polyexponential'], '')}</select></div>
             <div><label class="is-l">Steps</label><input type="number" data-k="novelai.steps" data-num></div>
@@ -443,10 +490,11 @@
         case 'var-del': s.vars.splice(vi, 1); save(); return renderVars();
         case 'var-save': if (v.value.trim() && !v.options.includes(v.value.trim())) { v.options.push(v.value.trim()); save(); renderVars(); } return;
         case 'var-rm': { const k = b.closest('.is-var').querySelector('select').value; if (k !== '') { v.options.splice(+k, 1); save(); renderVars(); } return; }
-        case 'import': { const c = JSON.parse($('#is_import').dataset.list)[$('#is_imp_sel').value]; if (c) { s.gemini.endpoint = c.endpoint; s.gemini.key = c.key; if (c.model) s.gemini.model = c.model; s.provider = 'gemini'; save(); applyUI(); toast('success', `Imported from ${c.name}.`); } return; }
-        case 'si-refresh': await loadSI(true); await renderSI(); return toast('info', 'Profiles refreshed.');
+        case 'import': { const c = JSON.parse($('#is_import').dataset.list)[$('#is_imp_sel').value]; if (c) { s.gemini.endpoint = c.endpoint; s.gemini.key = c.key; if (c.model) s.gemini.model = c.model; s.engine = 'standalone'; s.api = 'gemini'; save(); applyUI(); renderConn(); toast('success', `Imported from ${c.name}.`); } return; }
+        case 'si-refresh': for (const id of Object.keys(EXTS)) await loadExt(id, true); await renderConn(); return toast('info', 'Rescanned.');
+        case 'model-fetch': return fetchProfileModels();
         case 'si-styles': {
-          const si = await loadSI(); if (!si) return toast('error', 'sillyimages not found.');
+          const si = await loadExt(s.engine === 'standalone' ? 'sillyimages' : s.engine); if (!si) return toast('error', 'Generator extension not found.');
           const list = (si.set.getSettings().styles || []).filter(x => x.value);
           if (!list.length) return toast('info', 'No styles saved in sillyimages.');
           let sv = s.vars.find(x => x.name.toLowerCase() === 'style'); if (!sv) { sv = { name: 'style', value: '', options: [] }; s.vars.push(sv); }
@@ -466,12 +514,14 @@
         case 'lb-del': if (confirm('Delete this image from the library?')) { await libDel(state.lbId); $('#is_lb').classList.remove('on'); renderLibrary(); } return;
         case 'lb-use': {
           const it = (await libAll()).find(x => x.id === state.lbId); if (!it) return;
-          s.prompt = it.template; s.negative = it.negative; s.provider = it.provider;
+          s.prompt = it.template; s.negative = it.negative;
+          if (it.engine) { s.engine = it.engine; s.api = it.api || s.api; if (it.profile) s.profiles[it.engine] = it.profile; if (it.engine === 'standalone') s[s.api].model = it.modelRaw || s[s.api].model; else if (it.profile) s.models[`${it.engine}:${it.profile}`] = it.modelRaw || ''; }
+          else if (it.provider) { s.engine = it.provider === 'sillyimages' ? 'sillyimages' : 'standalone'; if (it.provider !== 'sillyimages') s.api = it.provider; }
           s.vars = Object.entries(it.vars).map(([name, value]) => ({ options: [], ...(s.vars.find(x => x.name === name) || {}), name, value }));
           if (!state.refsLoaded) await loadRefs();
           s.refSlots = (it.refIds || []).filter(id => state.refs.some(r => r.id === id)).slice(0, MAX_REFS);
           if ((it.refIds || []).length > s.refSlots.length) toast('info', 'Some saved references no longer exist.');
-          save(); $('#is_lb').classList.remove('on'); s.tab = 'create'; applyUI(); renderVars(); renderSlots(); return;
+          save(); $('#is_lb').classList.remove('on'); s.tab = 'create'; applyUI(); renderVars(); renderSlots(); renderConn(); return;
         }
       }
     });
@@ -479,6 +529,7 @@
     p.addEventListener('input', (e) => {
       const t = e.target, s = S();
       if (t.dataset.act === 'var-val') { s.vars[t.closest('.is-var').dataset.i].value = t.value; save(); return renderPreview(); }
+      if (t.dataset.act === 'model') { if (s.engine === 'standalone') s[s.api].model = t.value; else s.models[mkey()] = t.value; save(); return; }
       if (t.dataset.act === 'ref-name' || t.dataset.act === 'ref-desc') {
         const id = t.closest('.is-ref').dataset.id, r = state.refs.find(x => x.id === id); if (!r) return;
         r[t.dataset.act === 'ref-name' ? 'name' : 'description'] = t.value;
@@ -488,17 +539,18 @@
         let val = t.type === 'checkbox' ? t.checked : (t.hasAttribute('data-num') ? Number(t.value) : t.value);
         setPath(s, t.dataset.k, val); save();
         if (t.dataset.k === 'prompt' || t.dataset.k === 'negative') { clearTimeout(build._t); build._t = setTimeout(renderVars, 400); }
-        if (t.dataset.k === 'provider') { applyUI(); renderSI(); }
       }
     });
     p.addEventListener('change', (e) => {
-      const t = e.target;
+      const t = e.target, s = S();
       if (t.id === 'is_file') return handleFiles(t);
+      if (t.dataset.act === 'engine') { s.engine = t.value; save(); applyUI(); return renderConn(); }
+      if (t.dataset.act === 'conn') { if (s.engine === 'standalone') s.api = t.value; else s.profiles[s.engine] = t.value; save(); applyUI(); return renderConn(); }
       if (t.dataset.act === 'var-pick' && t.value !== '') { const v = S().vars[t.closest('.is-var').dataset.i]; v.value = v.options[+t.value]; save(); renderVars(); }
     });
   }
 
-  function toggle() { const p = $('#is_panel'); p.classList.toggle('is-hidden'); if (!p.classList.contains('is-hidden')) { applyUI(); renderVars(); renderResult(); renderSI(); renderSlots(); } }
+  function toggle() { const p = $('#is_panel'); p.classList.toggle('is-hidden'); if (!p.classList.contains('is-hidden')) { applyUI(); renderVars(); renderResult(); renderConn(); renderSlots(); } }
 
   function mountMenus(tries = 0) {
     const menu = $('#extensionsMenu');
