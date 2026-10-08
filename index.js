@@ -11,7 +11,7 @@
   const toast = (type, msg) => { try { window.toastr?.[type](msg, 'Image Studio'); } catch { console.log(msg); } };
 
   const DEFAULTS = {
-    engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true,
+    engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, slayStyle: '', slayStyleName: '', slayShare: false, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true,
     gemini: { endpoint: 'https://generativelanguage.googleapis.com', key: '', model: 'gemini-2.5-flash-image', aspect: '2:3', size: '1K' },
     novelai: { model: 'nai-diffusion-4-5-full', sampler: 'k_euler_ancestral', scheduler: 'karras', steps: 28, scale: 5, width: 832, height: 1216, seed: -1, decrisper: false, variety: false },
     prompt: '1girl, {style}, {quality}',
@@ -264,7 +264,11 @@
 
 
   /* ---------- Generator extensions (engine) → connection profile → model ---------- */
-  const EXTS = { sillyimages: { label: 'sillyimages', match: m => /sillyimages/i.test(m.homePage || '') || m.display_name === 'Inline Image Generation' } };
+  const EXTS = {
+    sillyimages: { label: 'sillyimages', kind: 'module', match: m => /sillyimages/i.test(m.homePage || '') || m.display_name === 'Inline Image Generation' },
+    slayimages: { label: 'SLAY Images', kind: 'slay', settingsKey: 'slay_image_gen', match: m => /slayimages/i.test(m.homePage || '') || /SLAY Images/i.test(m.display_name || '') },
+  };
+  const SLAY_NAISTERA_MODELS = [['grok', 'Grok'], ['nano banana', 'Nano Banana'], ['grok-pro', 'Grok Pro'], ['novelai', 'NovelAI']];
   const GEMINI_MODELS = [['gemini-2.5-flash-image', 'Nano Banana (2.5 Flash Image)'], ['gemini-3-pro-image-preview', 'Nano Banana Pro (3 Pro Image)'], ['gemini-3.1-flash-image-preview', 'Nano Banana 2 (3.1 Flash Image)']];
   const NAISTERA_MODELS = [['nano banana', 'Nano Banana'], ['nano banana pro', 'Nano Banana Pro'], ['nano banana 2', 'Nano Banana 2'], ['grok', 'Grok']];
   const NAI_MODELS = [['nai-diffusion-4-5-full', 'NovelAI V4.5 Full'], ['nai-diffusion-4-5-curated', 'NovelAI V4.5 Curated'], ['nai-diffusion-4-full', 'NovelAI V4 Full']];
@@ -281,6 +285,7 @@
         const base = `/scripts/extensions/${e.name}`;
         let m; try { m = await (await fetch(`${base}/manifest.json`)).json(); } catch { continue; }
         if (!EXTS[id].match(m)) continue;
+        if (EXTS[id].kind === 'slay') { extCache[id] = { id, kind: 'slay', name: e.name, getSettings: () => (ctx().extensionSettings[EXTS[id].settingsKey] = ctx().extensionSettings[EXTS[id].settingsKey] || {}) }; break; }
         const [prov, set] = await Promise.all([import(/* @vite-ignore */ `${base}/src/providers.js`), import(/* @vite-ignore */ `${base}/src/settings.js`)]);
         let nai = null; try { nai = await import(/* @vite-ignore */ `${base}/src/novelai.js`); } catch { /* optional */ }
         if (prov.resolveActiveProvider && set.getSettings) { extCache[id] = { id, prov, set, nai, name: e.name }; break; }
@@ -304,6 +309,7 @@
   async function genExt(prompt, neg, signal) {
     const s = S(), ext = await loadExt(s.engine);
     if (!ext) throw new Error(`${EXTS[s.engine]?.label || 'Generator extension'} not found. Install it or switch to Standalone.`);
+    if (ext.kind === 'slay') return genSlay(prompt, neg, signal);
     const st = ext.set.getSettings(), restore = applyConn(ext, st);
     try {
       const provider = ext.prov.resolveActiveProvider(st);
@@ -326,7 +332,150 @@
     } finally { restore(); }
   }
 
+
+  /* ---------- SLAY Images: connection from its settings, generation done here (it exposes no API) ---------- */
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const slayAspects = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
+  function xfetch(url, o = {}) {
+    if (!IS_IOS) return fetch(url, o);
+    return new Promise((res, rej) => { // iOS Safari: XHR is more reliable for long image requests (same trick SLAY uses)
+      const x = new XMLHttpRequest(); x.open(o.method || 'GET', url); x.timeout = 180000; x.responseType = 'text';
+      for (const [k, v] of Object.entries(o.headers || {})) x.setRequestHeader(k, v);
+      o.signal?.addEventListener('abort', () => x.abort());
+      x.onload = () => res({ ok: x.status >= 200 && x.status < 300, status: x.status, text: async () => x.responseText, json: async () => JSON.parse(x.responseText) });
+      x.ontimeout = () => rej(new Error('Request timed out')); x.onerror = () => rej(new Error('Network error')); x.onabort = () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      x.send(o.body || null);
+    });
+  }
+  const cleanKey = k => String(k || '').replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '').trim();
+  const trimEp = e => String(e || '').trim().replace(/\/+$/, '').replace(/\/v1(beta)?$/i, '').replace(/\/+$/, '');
+  const slayNaisteraModel = m => { const r = String(m || '').trim().toLowerCase(); if (!r) return 'grok'; if (/^nano[ -]banana/.test(r)) return 'nano banana'; return ['grok', 'nano banana', 'grok-pro', 'novelai'].includes(r) ? r : 'grok'; };
+  // Effective connection: chosen SLAY profile (or its live settings) + the model picked in Studio.
+  function slayConn() {
+    const s = S(), ext = extCache.slayimages, st = ext.getSettings(), pid = s.profiles.slayimages;
+    const prof = pid && pid !== '__live__' ? (st.connectionProfiles || []).find(p => p.name === pid) : null, src = prof || st;
+    const apiType = src.apiType || 'openai', pick = String(s.models[mkey()] || '').trim();
+    return { st, apiType, endpoint: src.endpoint || '', apiKey: src.apiKey || '', customBodyFormat: src.customBodyFormat || st.customBodyFormat || 'chat',
+      model: pick || (apiType === 'naistera' ? (st.naisteraModel || '') : (src.model || '')) };
+  }
+  const slayStyleNow = () => { const s = S(); return String(s.slayShare ? (extCache.slayimages?.getSettings().slayStyle || '') : s.slayStyle || '').trim(); };
+  function injectStyle(prompt, style) { // same [STYLE: …] block SLAY itself uses
+    const p = String(prompt || '').trim(), st = String(style || '').trim(); if (!st) return p;
+    const block = `[STYLE: ${st}]`, re = /\[\s*style\s*:\s*[^\]]*\]/i;
+    return re.test(p) ? p.replace(re, () => block) : `${block}\n\n${p}`.trim();
+  }
+  function slayExtractImage(r) {
+    const m = r?.choices?.[0]?.message;
+    if (m) {
+      if (Array.isArray(m.images) && m.images[0]) { const i = m.images[0]; if (i?.image_url?.url) return i.image_url.url; if (typeof i === 'string') return i; if (i?.url) return i.url; if (i?.b64_json) return `data:image/png;base64,${i.b64_json}`; }
+      if (Array.isArray(m.content)) for (const part of m.content) { if (part?.type === 'image_url' && part?.image_url?.url) return part.image_url.url; if (part?.type === 'image' && part?.source?.data) return `data:${part.source.media_type || 'image/png'};base64,${part.source.data}`; }
+      if (typeof m.content === 'string' && m.content) {
+        const d = m.content.match(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+/); if (d) return d[0];
+        const md = m.content.match(/!\[[^\]]*\]\((https?:\/\/[^)]+|data:image\/[^)]+)\)/); if (md) return md[1];
+        const u = m.content.match(/https?:\/\/\S+\.(?:png|jpe?g|webp|gif)(?:\?\S*)?/i); if (u) return u[0];
+      }
+      if (m.image_url?.url) return m.image_url.url;
+    }
+    const d0 = r?.data?.[0]; if (d0) return d0.b64_json ? `data:image/png;base64,${d0.b64_json}` : d0.url || null;
+    return null;
+  }
+  async function urlToDataUrl(u) {
+    const b = await (await fetch(u)).blob();
+    return await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); });
+  }
+  async function genSlay(prompt, neg, signal) {
+    const s = S(), c = slayConn(), st = c.st, key = cleanKey(c.apiKey);
+    if (c.apiType !== 'naistera' && !c.endpoint) throw new Error('SLAY connection has no endpoint. Fill it in SLAY Images settings.');
+    if (!key) throw new Error('SLAY connection has no API key.');
+    if (!/^[\x20-\x7E]+$/.test(key)) throw new Error('API key contains invalid characters (hidden unicode from copy/paste). Re-enter it in SLAY Images.');
+    if (!['naistera', 'custom'].includes(c.apiType) && !c.model) throw new Error('Pick a model in Image Studio (or set one in the SLAY profile).');
+    const text0 = neg ? `${prompt}\n\nAvoid: ${neg}` : prompt, style = slayStyleNow();
+    const cap = c.apiType === 'naistera' ? (['grok', 'nano banana'].includes(slayNaisteraModel(c.model)) ? 5 : 0) : (c.apiType === 'custom' && c.customBodyFormat === 'images' ? 0 : 5);
+    const refs = s.useRefs && cap && chars().some(x => x.mode !== 'text') ? await buildRefs('base64', cap) : [];
+    if (s.useRefs && !cap && chars().some(x => x.mode !== 'text')) toast('info', 'This SLAY connection/model does not accept reference images, so they were skipped.');
+    const instr = refs.map((r, i) => r.description ? `Image ${i + 1} is ${r.description} — preserve this appearance exactly.` : `Image ${i + 1} is a character reference — preserve this appearance exactly.`);
+    const refHead = refs.length ? `${instr.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n` : '';
+    let ratio = s.aspectOverride || (st.aspectRatio && st.aspectRatio !== 'auto' ? st.aspectRatio : '1:1'); if (!slayAspects.includes(ratio)) ratio = '1:1';
+    let size = ['1K', '2K', '4K'].includes(st.imageSize) ? st.imageSize : '1K';
+    let r, out;
+    if (c.apiType === 'gemini') {
+      const parts = refs.map(x => ({ inlineData: { mimeType: 'image/png', data: x.image } })); parts.push({ text: refHead + injectStyle(text0, style) });
+      const headers = { 'Content-Type': 'application/json', 'x-goog-api-key': key }; if (!/googleapis\.com/.test(c.endpoint)) headers.Authorization = `Bearer ${key}`;
+      r = await xfetch(`${trimEp(c.endpoint)}/v1beta/models/${encodeURIComponent(c.model)}:generateContent`, { method: 'POST', headers, signal: signal, body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: ratio, imageSize: size } } }) });
+      if (!r.ok) throw new Error(`API Error (${r.status}): ${(await r.text()).slice(0, 300)}`);
+      for (const part of (await r.json()).candidates?.[0]?.content?.parts || []) { const d = part.inlineData || part.inline_data; if (d?.data) return `data:${d.mimeType || d.mime_type || 'image/png'};base64,${d.data}`; }
+      throw new Error('No image found in Gemini response');
+    }
+    if (c.apiType === 'naistera') {
+      const model = slayNaisteraModel(c.model), base = String(c.endpoint || 'https://naistera.org').trim().replace(/\/+$/, '').replace(/\/api\/generate$/i, '');
+      const ratioN = s.aspectOverride || (st.naisteraAspectRatio && st.naisteraAspectRatio !== 'auto' ? st.naisteraAspectRatio : '1:1');
+      const lead = refs.length ? `[Reference images attached, in order: ${refs.map((x, i) => `${i + 1}=${x.description || 'reference'}`).join(', ')}. Use each reference for ITS OWN named subject only — do not mix attributes between subjects.] ` : '';
+      const body = { prompt: lead + injectStyle(text0, style), aspect_ratio: ratioN, model }; if (refs.length) body.reference_images = refs.map(x => `data:image/png;base64,${x.image}`);
+      r = await xfetch(`${base}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, signal, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error(`API Error (${r.status}): ${(await r.text()).slice(0, 300)}`);
+      const j = await r.json(); if (!j?.data_url) throw new Error('No data_url in response');
+      if (j.media_kind === 'video') throw new Error('Naistera returned a video; Image Studio shows images only.');
+      return j.data_url;
+    }
+    // openai / custom
+    const isCustom = c.apiType === 'custom', full = injectStyle(text0, style) + (isCustom && c.customBodyFormat === 'images' ? '' : `\n\n[aspect_ratio: ${ratio}] [image_size: ${size}]`);
+    let url, body;
+    if (isCustom && c.customBodyFormat === 'images') { url = c.endpoint.trim().replace(/\/+$/, ''); body = { ...(c.model ? { model: c.model } : {}), prompt: full, n: 1, size: st.size || '1024x1024', response_format: 'b64_json' }; }
+    else {
+      url = isCustom ? c.endpoint.trim().replace(/\/+$/, '') : `${trimEp(c.endpoint)}/v1/chat/completions`;
+      body = { ...(c.model ? { model: c.model } : {}), messages: [{ role: 'user', content: [{ type: 'text', text: refHead + full }, ...refs.map(x => ({ type: 'image_url', image_url: { url: `data:image/png;base64,${x.image}` } }))] }], modalities: ['image', 'text'], stream: false };
+    }
+    r = await xfetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, signal, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error(`API Error (${r.status}): ${(await r.text()).slice(0, 300)}`);
+    out = slayExtractImage(await r.json()); if (!out) throw new Error('No image data in response.');
+    return /^https?:\/\//i.test(out) ? await urlToDataUrl(out) : out;
+  }
+  async function fetchSlayModels(silent) {
+    const k = mkey(); state.modelTried[k] = true; const c = slayConn(), key = cleanKey(c.apiKey);
+    try {
+      if (['custom', 'naistera'].includes(c.apiType)) { if (!silent) toast('info', 'This connection type has no model list. Use the list or “Other…”.'); return; }
+      if (!c.endpoint || !key) throw new Error('endpoint / key missing in the SLAY connection');
+      const base = trimEp(c.endpoint), gem = c.apiType === 'gemini';
+      const headers = gem && /googleapis\.com/.test(base) ? { 'x-goog-api-key': key } : { Authorization: `Bearer ${key}` };
+      const r = await fetch(gem ? `${base}/v1beta/models?pageSize=200` : `${base}/v1/models`, { headers });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      let ids = gem ? (j.models || []).map(m => String(m.name || '').replace(/^models\//, '')) : (j.data || []).map(m => m.id);
+      ids = ids.filter(Boolean); if (gem) ids = ids.filter(i => /image/i.test(i));
+      const img = /image|imagen|dall|flux|diffusion|banana|seedream|midjourney|sdxl|draw|paint/i; // likely image models first
+      state.modelCache[k] = [...ids.filter(i => img.test(i)).sort(), ...ids.filter(i => !img.test(i)).sort()];
+      if (!silent) toast('success', `${state.modelCache[k].length} model(s) found.`);
+    } catch (e) { if (!silent) toast('error', 'Could not fetch models: ' + (e.message || e)); }
+    renderConn();
+  }
+  /* style button: opens SLAY's own picker; the Studio keeps its own choice unless “share with chat” is on */
+  function renderSlayStyle() {
+    const el = $('#is_slay_name'); if (!el) return;
+    const s = S(), st = extCache.slayimages?.getSettings() || {};
+    const name = s.slayShare ? (st.slayStyleName && st.slayStyle ? st.slayStyleName : '') : s.slayStyleName;
+    el.textContent = name || (slayStyleNow() ? 'Custom style' : 'No style'); el.title = slayStyleNow();
+  }
+  async function openSlayStyle() {
+    const ext = await loadExt('slayimages'); if (!ext) return toast('error', 'SLAY Images not found.');
+    const btn = document.getElementById('slay_style_pick_btn');
+    if (!btn) return toast('error', 'SLAY style button not loaded. Open the SLAY Images settings drawer once, then try again.');
+    const st = ext.getSettings(), s = S(), prev = { style: st.slayStyle, name: st.slayStyleName };
+    if (!s.slayShare) { st.slayStyle = s.slayStyle; st.slayStyleName = s.slayStyleName; } // so the picker highlights the Studio's current style
+    const restore = () => { if (s.slayShare) return; st.slayStyle = prev.style; st.slayStyleName = prev.name; const el = document.getElementById('slay_style_name'); if (el) el.textContent = prev.name || 'Не заменять'; ctx().saveSettingsDebounced(); };
+    btn.click();
+    let seen = false, n = 0;
+    const iv = setInterval(() => {
+      const open = !!document.querySelector('.slay-style-overlay'); if (open) seen = true;
+      if ((seen && !open) || ++n > 1200) {
+        clearInterval(iv);
+        if (seen) { s.slayStyle = st.slayStyle || ''; s.slayStyleName = st.slayStyle ? (st.slayStyleName || '') : ''; save(); }
+        restore(); renderSlayStyle();
+      }
+    }, 250);
+  }
+
   async function fetchProfileModels(silent = false) {
+    if (EXTS[S().engine]?.kind === 'slay') return fetchSlayModels(silent);
     const s = S(), ext = await loadExt(s.engine); if (!ext) return;
     const k = mkey(); state.modelTried[k] = true;
     const st = ext.set.getSettings(), restore = applyConn(ext, st, '');
@@ -338,6 +487,7 @@
   function modelOptions(ext, type) {
     const s = S(); let base = [];
     if (s.engine === 'standalone') base = s.api === 'novelai' ? NAI_MODELS : GEMINI_MODELS;
+    else if (ext?.kind === 'slay') base = type === 'gemini' ? GEMINI_MODELS : type === 'naistera' ? SLAY_NAISTERA_MODELS : [];
     else if (type === 'novelai') base = Object.entries(ext.nai?.NOVELAI_MODELS || {}).length ? Object.entries(ext.nai.NOVELAI_MODELS) : NAI_MODELS;
     else if (type === 'gemini') base = GEMINI_MODELS;
     else if (type === 'naistera') base = NAISTERA_MODELS;
@@ -364,12 +514,22 @@
     } else {
       const ext = extCache[s.engine];
       if (!ext) { conn.innerHTML = '<option value="">Extension not found</option>'; model.innerHTML = ''; custom.style.display = 'none'; hint.textContent = `${EXTS[s.engine].label} is not installed or could not be loaded. Pick Standalone instead.`; return; }
-      const st = ext.set.getSettings(), ps = st.connectionProfiles || [];
-      conn.innerHTML = ps.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.apiType)})</option>`).join('') || '<option value="">No profiles</option>';
-      if (!ps.some(p => p.id === s.profiles[s.engine])) { s.profiles[s.engine] = st.activeConnectionProfileId || ps[0]?.id || ''; save(); }
-      conn.value = s.profiles[s.engine];
-      const prof = ps.find(p => p.id === conn.value), type = prof?.apiType;
-      defLabel = `Profile's model: ${(type === 'naistera' ? prof?.naisteraModel : prof?.model) || 'not set'}`;
+      let st, ps, prof, type;
+      if (ext.kind === 'slay') {
+        st = ext.getSettings(); const sp = st.connectionProfiles || [];
+        ps = [{ id: '__live__', name: 'Current SLAY settings', apiType: st.apiType || 'openai', model: st.model, naisteraModel: st.naisteraModel }, ...sp.map(p => ({ ...p, id: p.name }))];
+        conn.innerHTML = ps.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.apiType || 'openai')})</option>`).join('');
+        if (!ps.some(p => p.id === s.profiles[s.engine])) { s.profiles[s.engine] = '__live__'; save(); }
+        conn.value = s.profiles[s.engine]; prof = ps.find(p => p.id === conn.value); type = prof?.apiType || 'openai';
+        defLabel = `Profile's model: ${(type === 'naistera' ? prof?.naisteraModel || st.naisteraModel : prof?.model) || 'not set'}`;
+      } else {
+        st = ext.set.getSettings(); ps = st.connectionProfiles || [];
+        conn.innerHTML = ps.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.apiType)})</option>`).join('') || '<option value="">No profiles</option>';
+        if (!ps.some(p => p.id === s.profiles[s.engine])) { s.profiles[s.engine] = st.activeConnectionProfileId || ps[0]?.id || ''; save(); }
+        conn.value = s.profiles[s.engine];
+        prof = ps.find(p => p.id === conn.value); type = prof?.apiType;
+        defLabel = `Profile's model: ${(type === 'naistera' ? prof?.naisteraModel : prof?.model) || 'not set'}`;
+      }
       opts = modelOptions(ext, type);
       if (prof && !STATIC_TYPES.includes(type) && !state.modelTried[mkey()]) fetchProfileModels(true); // auto-load list for proxies / OpenAI-style APIs
       hint.textContent = 'The profile supplies endpoint, key and API type. The model chosen here is used only by Image Studio.';
@@ -380,6 +540,7 @@
       + opts.map(([id, l]) => `<option value="${esc(id)}">${esc(l)}</option>`).join('') + '<option value="__other__">Other…</option>';
     model.value = isCustom ? '__other__' : cur;
     custom.style.display = isCustom ? '' : 'none'; custom.value = isCustom ? cur : '';
+    renderSlayStyle();
   }
 
   /* ---------- Rendering ---------- */
@@ -397,7 +558,7 @@
       </div>`).join('') || '<div class="is-hint">Type {style} (or any {name}) in the main prompt to create a variable.</div>';
     renderPreview();
   }
-  function renderPreview() { const el = $('#is_prev'); if (!el) return; const f = buildFinal(); el.textContent = f.prompt + (f.neg ? `\n\n— Negative —\n${f.neg}` : ''); }
+  function renderPreview() { const el = $('#is_prev'); if (!el) return; const f = buildFinal(), sty = S().engine === 'slayimages' ? slayStyleNow() : ''; el.textContent = (sty ? `[STYLE: ${sty}]\n\n` : '') + f.prompt + (f.neg ? `\n\n— Negative —\n${f.neg}` : ''); }
 
   function renderResult() {
     const el = $('#is_result'), l = state.last;
@@ -438,7 +599,7 @@
     const sbx = $('#is_show_btn'); if (sbx) sbx.checked = !!s.showButton;
     $$('.is-tab', p).forEach(t => t.classList.toggle('on', t.dataset.tab === s.tab));
     $$('.is-sec', p).forEach(t => t.classList.toggle('on', t.dataset.tab === s.tab));
-    $$('[data-show]', p).forEach(e => { const k = e.dataset.show; const on = k === 'ext' ? s.engine !== 'standalone' : (s.engine === 'standalone' && (k === 'standalone' || s.api === k)); e.style.display = on ? '' : 'none'; });
+    $$('[data-show]', p).forEach(e => { const k = e.dataset.show; const on = k === 'ext' ? s.engine !== 'standalone' : k === 'slay' ? s.engine === 'slayimages' : k === 'si' ? s.engine === 'sillyimages' : (s.engine === 'standalone' && (k === 'standalone' || s.api === k)); e.style.display = on ? '' : 'none'; });
     $$('[data-k]', p).forEach(e => { const v = getPath(s, e.dataset.k); if (e.type === 'checkbox') e.checked = !!v; else if (document.activeElement !== e) e.value = v ?? ''; });
   }
 
@@ -484,6 +645,9 @@
           <input type="text" id="is_model_custom" data-act="model-custom" placeholder="Custom model id" autocomplete="off" style="display:none;margin-top:6px">
           <div data-show="ext"><label class="is-l">Aspect ratio override (Gemini / nano banana only)</label>
             <select data-k="aspectOverride"><option value="">Use profile setting</option>${opt(['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'], '')}</select></div>
+          <div data-show="slay" style="display:none"><label class="is-l">SLAY style</label>
+            <div class="is-row"><span id="is_slay_name" class="is-slay-name">No style</span><button class="is-btn" data-act="slay-style" style="white-space:nowrap">🎨 Choose style</button><button class="is-ib" data-act="slay-style-clear" title="No style">✕</button></div>
+            <label class="is-l"><input type="checkbox" data-k="slayShare"> Share with chat (use SLAY's own current style)</label></div>
           <div class="is-hint" id="is_sihint"></div>
           <label class="is-l">Main prompt — use {tags} for swappable parts</label>
           <textarea data-k="prompt" placeholder="1girl, {style}, standing in a forest"></textarea>
@@ -514,7 +678,7 @@
         <section class="is-sec" data-tab="setup">
           <div data-show="ext">
             <div class="is-hint">Endpoint, key and API type come from the extension profile you pick on the Create tab. Nothing to enter here.</div>
-            <button class="is-btn full" data-act="si-styles">Import the extension's styles as {style} options</button>
+            <button class="is-btn full" data-show="si" data-act="si-styles">Import the extension's styles as {style} options</button>
             <button class="is-btn full" style="margin-top:6px" data-act="si-refresh">Re-scan extensions and profiles</button>
           </div>
           <label class="is-l">Copy settings from another image extension (standalone mode)</label><div id="is_import"></div>
@@ -569,7 +733,7 @@
         case 'si-refresh': for (const id of Object.keys(EXTS)) await loadExt(id, true); await renderConn(); return toast('info', 'Rescanned.');
         case 'model-fetch': return fetchProfileModels(false);
         case 'si-styles': {
-          const si = await loadExt(s.engine === 'standalone' ? 'sillyimages' : s.engine); if (!si) return toast('error', 'Generator extension not found.');
+          const si = await loadExt('sillyimages'); if (!si?.set) return toast('error', 'sillyimages not found.');
           const list = (si.set.getSettings().styles || []).filter(x => x.value);
           if (!list.length) return toast('info', 'No styles saved in sillyimages.');
           let sv = s.vars.find(x => x.name.toLowerCase() === 'style'); if (!sv) { sv = { name: 'style', value: '', options: [] }; s.vars.push(sv); }
@@ -577,6 +741,8 @@
           save(); renderVars(); return toast('success', `Imported ${list.length} style(s) into {style}.`);
         }
         case 'slot-add': return openPicker();
+        case 'slay-style': return openSlayStyle();
+        case 'slay-style-clear': s.slayStyle = ''; s.slayStyleName = ''; save(); return renderSlayStyle();
         case 'ref-text-new': { await addTextRef(); renderRefs(); return toast('success', 'Text-only character added. Give it a name and prompt.'); }
         case 'reset-pos': s.fabPos = null; s.panelPos = null; save(); placeFab(); placePanel(); return toast('success', 'Positions reset.');
         case 'chip': {
@@ -627,6 +793,7 @@
       if (t.dataset.k) {
         let val = t.type === 'checkbox' ? t.checked : (t.hasAttribute('data-num') ? Number(t.value) : t.value);
         setPath(s, t.dataset.k, val); save();
+        if (t.dataset.k === 'slayShare') renderSlayStyle();
         if (t.dataset.k === 'showButton') { applyUI(); if (!val) toast('info', 'Button hidden. Open Image Studio from the wand menu or Extensions settings.'); }
         if (t.dataset.k === 'prompt' || t.dataset.k === 'negative') { clearTimeout(build._t); build._t = setTimeout(renderVars, 400); renderChips(); }
       }

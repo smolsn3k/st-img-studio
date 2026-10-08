@@ -112,3 +112,5 @@
 .is-slotd textarea{min-height:56px!important;margin-top:4px}
 .is-pickitem .is-noimg{width:100%;height:auto;aspect-ratio:1;border-radius:0;font-size:22px}
 @media (min-width:701px){.is-head{cursor:move;touch-action:none}.is-head button,.is-head input{cursor:pointer}}
+
+.is-slay-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;opacity:.8}
