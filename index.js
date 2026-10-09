@@ -11,7 +11,7 @@
   const toast = (type, msg) => { try { window.toastr?.[type](msg, 'Image Studio'); } catch { console.log(msg); } };
 
   const DEFAULTS = {
-    engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, slayStyle: '', slayStyleName: '', slayShare: false, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true,
+    engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, extPaths: {}, slayStyle: '', slayStyleName: '', slayShare: false, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true,
     gemini: { endpoint: 'https://generativelanguage.googleapis.com', key: '', model: 'gemini-2.5-flash-image', aspect: '2:3', size: '1K' },
     novelai: { model: 'nai-diffusion-4-5-full', sampler: 'k_euler_ancestral', scheduler: 'karras', steps: 28, scale: 5, width: 832, height: 1216, seed: -1, decrisper: false, variety: false },
     prompt: '1girl, {style}, {quality}',
@@ -274,24 +274,46 @@
   const NAI_MODELS = [['nai-diffusion-4-5-full', 'NovelAI V4.5 Full'], ['nai-diffusion-4-5-curated', 'NovelAI V4.5 Curated'], ['nai-diffusion-4-full', 'NovelAI V4 Full']];
   const STATIC_TYPES = ['novelai', 'gemini', 'naistera'];
   const extCache = {}; let discovered;
-  async function loadExt(id, force = false) {
-    if (force) { discovered = undefined; delete extCache[id]; }
-    if (extCache[id] !== undefined) return extCache[id];
-    extCache[id] = null;
-    try {
-      discovered = discovered || await (await fetch('/api/extensions/discover')).json();
-      for (const e of discovered) {
-        if (!e?.name || e.type === 'system') continue;
-        const base = `/scripts/extensions/${e.name}`;
-        let m; try { m = await (await fetch(`${base}/manifest.json`)).json(); } catch { continue; }
-        if (!EXTS[id].match(m)) continue;
-        if (EXTS[id].kind === 'slay') { extCache[id] = { id, kind: 'slay', name: e.name, getSettings: () => (ctx().extensionSettings[EXTS[id].settingsKey] = ctx().extensionSettings[EXTS[id].settingsKey] || {}) }; break; }
-        const [prov, set] = await Promise.all([import(/* @vite-ignore */ `${base}/src/providers.js`), import(/* @vite-ignore */ `${base}/src/settings.js`)]);
-        let nai = null; try { nai = await import(/* @vite-ignore */ `${base}/src/novelai.js`); } catch { /* optional */ }
-        if (prov.resolveActiveProvider && set.getSettings) { extCache[id] = { id, prov, set, nai, name: e.name }; break; }
-      }
-    } catch (e) { console.warn('[Image Studio] extension lookup failed', id, e); }
-    return extCache[id];
+  const extLoading = {}; let discoverP;
+  const NAME_HINT = { sillyimages: /silly.?images|inline.?image|iig/i, slayimages: /slay/i };
+  async function fetchJson(url, ms = 4000) {
+    const c = new AbortController(), tm = setTimeout(() => c.abort(), ms);
+    try { const r = await fetch(url, { signal: c.signal }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); } finally { clearTimeout(tm); }
+  }
+  async function buildExt(id, name) {
+    const base = `/scripts/extensions/${name}`;
+    if (EXTS[id].kind === 'slay') return { id, kind: 'slay', name, getSettings: () => (ctx().extensionSettings[EXTS[id].settingsKey] = ctx().extensionSettings[EXTS[id].settingsKey] || {}) };
+    const [prov, set] = await Promise.all([import(/* @vite-ignore */ `${base}/src/providers.js`), import(/* @vite-ignore */ `${base}/src/settings.js`)]);
+    let nai = null; try { nai = await import(/* @vite-ignore */ `${base}/src/novelai.js`); } catch { /* optional */ }
+    return prov.resolveActiveProvider && set.getSettings ? { id, prov, set, nai, name } : null;
+  }
+  // undefined = not looked up yet, null = looked up and not installed. Concurrent callers share one lookup.
+  // quick = background lookup for an engine nobody selected: only the remembered folder / likely folder names, never a full scan
+  function loadExt(id, force = false, quick = false) {
+    if (force) { delete extCache[id]; delete extLoading[id]; discoverP = null; }
+    if (extCache[id] !== undefined) return Promise.resolve(extCache[id]);
+    if (extLoading[id]) return extLoading[id].quick && !quick ? extLoading[id].then(() => (extCache[id] !== undefined ? extCache[id] : loadExt(id))) : extLoading[id];
+    const pr = (extLoading[id] = (async () => {
+      let found = null, failed = false; const tried = new Set();
+      const tryName = async (name) => {
+        if (!name || tried.has(name)) return null; tried.add(name);
+        try { const m = await fetchJson(`/scripts/extensions/${name}/manifest.json`); return EXTS[id].match(m) ? await buildExt(id, name) : null; } catch { return null; }
+      };
+      try {
+        found = await tryName(S().extPaths[id]);                                   // 1. folder remembered from last time
+        if (!found) {
+          discoverP = discoverP || fetchJson('/api/extensions/discover', 8000);
+          const list = (await discoverP).filter(e => e?.name && e.type !== 'system').map(e => e.name);
+          for (const n of list.filter(n => NAME_HINT[id].test(n))) { found = await tryName(n); if (found) break; }   // 2. folders named like it
+          for (let i = 0, rest = quick ? [] : list.filter(n => !tried.has(n)); !found && i < rest.length; i += 6) found = (await Promise.all(rest.slice(i, i + 6).map(tryName))).find(Boolean) || null; // 3. the rest, 6 at a time
+        }
+        if (found && S().extPaths[id] !== found.name) { S().extPaths[id] = found.name; save(); }
+      } catch (e) { failed = true; discoverP = null; console.warn('[Image Studio] extension lookup failed', id, e); }
+      if (!failed && (found || !quick)) extCache[id] = found;   // failed or partial lookups aren't remembered, so a real selection looks again
+      delete extLoading[id];
+      return found;
+    })());
+    pr.quick = quick; return pr;
   }
   const loadSI = (force) => loadExt('sillyimages', force);
   const mkey = () => { const s = S(); return `${s.engine}:${s.profiles[s.engine] || ''}`; };
@@ -499,12 +521,24 @@
   const rawModel = () => { const s = S(); return s.engine === 'standalone' ? s[s.api].model : (s.models[mkey()] || ''); };
   const modelLabel = () => { const s = S(), m = rawModel(); const c = $('#is_conn')?.selectedOptions?.[0]?.textContent || s.engine; return `${c} · ${m || 'profile model'}`; };
 
-  async function renderConn() {
-    const eng = $('#is_engine'); if (!eng) return;
-    const s = S(), ids = Object.keys(EXTS);
-    await Promise.all(ids.map(id => loadExt(id)));
-    eng.innerHTML = ids.map(id => `<option value="${id}">${EXTS[id].label}${extCache[id] ? '' : ' (not found)'}</option>`).join('') + '<option value="standalone">Standalone (own connection)</option>';
+  function renderEngineOptions() {
+    const eng = $('#is_engine'), s = S(); if (!eng) return;
+    eng.innerHTML = Object.keys(EXTS).map(id => `<option value="${id}">${EXTS[id].label}${extCache[id] === null ? ' (not found)' : ''}</option>`).join('') + '<option value="standalone">Standalone (own connection)</option>';
     eng.value = s.engine;
+  }
+  async function renderConn() {
+    if (!$('#is_engine')) return;
+    const s = S();
+    renderEngineOptions();
+    for (const id of Object.keys(EXTS)) if (id !== s.engine && extCache[id] === undefined) loadExt(id, false, true).then(renderEngineOptions); // background
+    if (s.engine !== 'standalone' && extCache[s.engine] === undefined) {
+      $('#is_conn').innerHTML = `<option value="${esc(s.profiles[s.engine] || '')}">Loading…</option>`;
+      $('#is_model').innerHTML = `<option value="">${esc(rawModel() || 'Loading…')}</option>`;
+      $('#is_sihint').textContent = `Looking for ${EXTS[s.engine].label}…`;
+      await loadExt(s.engine);
+      if (S().engine !== s.engine) return; // switched while loading
+      renderEngineOptions();
+    }
     const conn = $('#is_conn'), model = $('#is_model'), custom = $('#is_model_custom'), hint = $('#is_sihint');
     let opts = [], defLabel = '';
     if (s.engine === 'standalone') {
@@ -635,6 +669,7 @@
         <div class="is-op-wrap" title="Panel opacity"><span>◐</span><input type="range" id="is_op" min="25" max="100"></div>
         <button class="is-ib" id="is_min" title="Collapse">▾</button><button class="is-ib" id="is_close" title="Close">✕</button>
       </div>
+      <div id="is_err" class="is-hint" style="display:none;color:#f88;padding:6px 10px"></div>
       <div class="is-tabs"><button class="is-tab" data-tab="create">Create</button><button class="is-tab" data-tab="library">Library</button><button class="is-tab" data-tab="refs">Refs</button><button class="is-tab" data-tab="setup">Setup</button></div>
       <div class="is-body">
         <section class="is-sec" data-tab="create">
@@ -709,7 +744,7 @@
     </div>`);
     const p = $('#is_panel');
 
-    $('#is_fab').addEventListener('click', e => { if (e.currentTarget._dragged) return; toggle(); });
+    $('#is_fab').addEventListener('click', e => { const f = e.currentTarget; if (f._dragged || Date.now() - (f._tapAt || 0) < 700) return; toggle(); });
     $('#is_close').addEventListener('click', () => p.classList.add('is-hidden'));
     $('#is_min').addEventListener('click', () => { const s = S(); s.minimized = !s.minimized; save(); applyUI(); });
     $('#is_op').addEventListener('input', e => { const s = S(); s.opacity = e.target.value / 100; p.style.setProperty('--is-op', s.opacity); save(); });
@@ -810,7 +845,7 @@
   }
 
   /* ---------- dragging (floating button + desktop window) ---------- */
-  function dragify(el, handle, { skip, enabled, move, end }) {
+  function dragify(el, handle, { skip, enabled, move, end, tap }) {
     let id = null, sx = 0, sy = 0, ox = 0, oy = 0, moving = false;
     handle.addEventListener('pointerdown', e => {
       if (e.button > 0 || (enabled && !enabled()) || (skip && e.target.closest(skip))) return;
@@ -824,10 +859,11 @@
       moving = true; e.preventDefault(); move(ox + dx, oy + dy);
     });
     const up = e => {
-      if (e.pointerId !== id) return; id = null;
+      if (e.pointerId !== id) return; id = null; const tapped = !moving && e.type === 'pointerup';
       try { handle.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
       if (moving) { handle._dragged = true; setTimeout(() => { handle._dragged = false; }, 80); end(); }
       moving = false;
+      if (tapped && tap) tap(e);
     };
     handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
   }
@@ -848,6 +884,7 @@
   function setupDrag() {
     const f = $('#is_fab'), p = $('#is_panel');
     dragify(f, f, {
+      tap: () => { f._tapAt = Date.now(); toggle(); },
       move: (x, y) => { x = clamp(x, 4, innerWidth - f.offsetWidth - 4); y = clamp(y, 4, innerHeight - f.offsetHeight - 4); Object.assign(f.style, { left: x + 'px', top: y + 'px', right: 'auto', bottom: 'auto' }); f._x = x; f._y = y; },
       end: () => { S().fabPos = { fx: f._x / Math.max(1, innerWidth - f.offsetWidth), fy: f._y / Math.max(1, innerHeight - f.offsetHeight) }; save(); },
     });
@@ -860,18 +897,26 @@
     window.addEventListener('resize', () => { placeFab(); placePanel(); });
   }
 
-  function toggle() { const p = $('#is_panel'); p.classList.toggle('is-hidden'); if (!p.classList.contains('is-hidden')) { placePanel(); applyUI(); renderVars(); renderResult(); renderConn(); renderSlots(); } }
+  function showErr(where, e) { console.error('[Image Studio]', where, e); const el = $('#is_err'); if (el) { el.textContent = `⚠ ${where}: ${e?.message || e}`; el.style.display = ''; } }
+  function guard(where, fn) { try { const r = fn(); if (r && r.catch) r.catch(e => showErr(where, e)); } catch (e) { showErr(where, e); } }
+  function toggle() {
+    const p = $('#is_panel'); p.classList.toggle('is-hidden');
+    if (p.classList.contains('is-hidden')) return;
+    const er = $('#is_err'); if (er) er.style.display = 'none';
+    // each step is isolated so one failure can't leave the other fields empty
+    for (const [n, f] of [['layout', placePanel], ['settings', applyUI], ['variables', renderVars], ['result', renderResult], ['references', renderSlots], ['connection', renderConn]]) guard(n, f);
+  }
 
   function mountMenus(tries = 0) {
     const menu = $('#extensionsMenu');
     if (menu && !$('#is_menu_item')) menu.insertAdjacentHTML('beforeend', '<div id="is_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0"><div class="fa-solid fa-palette extensionsMenuExtensionButton"></div><span>Image Studio</span></div>');
-    $('#is_menu_item')?.addEventListener('click', () => { if ($('#is_panel').classList.contains('is-hidden')) toggle(); });
+    const mi = $('#is_menu_item'); if (mi && !mi.dataset.bound) { mi.dataset.bound = 1; mi.addEventListener('click', () => { if ($('#is_panel').classList.contains('is-hidden')) toggle(); }); }
     const host = $('#extensions_settings2') || $('#extensions_settings');
     if (host && !$('#is_settings')) host.insertAdjacentHTML('beforeend', `<div id="is_settings" class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Image Studio</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><label class="checkbox_label"><input type="checkbox" id="is_show_btn"><span>Show floating button</span></label><div class="menu_button" id="is_open_btn">Open Image Studio</div></div></div>`);
     const sb = $('#is_show_btn'); if (sb && !sb.dataset.bound) { sb.dataset.bound = 1; sb.checked = S().showButton; sb.addEventListener('change', () => { S().showButton = sb.checked; save(); applyUI(); }); }
-    $('#is_open_btn')?.addEventListener('click', () => { if ($('#is_panel').classList.contains('is-hidden')) toggle(); });
+    const ob = $('#is_open_btn'); if (ob && !ob.dataset.bound) { ob.dataset.bound = 1; ob.addEventListener('click', () => { if ($('#is_panel').classList.contains('is-hidden')) toggle(); }); }
     if ((!menu || !host) && tries < 20) setTimeout(() => mountMenus(tries + 1), 500);
   }
 
-  jQuery(() => { build(); setupDrag(); applyUI(); placeFab(); placePanel(); renderVars(); renderResult(); mountMenus(); loadRefs().then(() => { renderSlots(); renderRefs(); }); });
+  jQuery(() => { build(); for (const [n, f] of [['drag', setupDrag], ['settings', applyUI], ['button', placeFab], ['layout', placePanel], ['variables', renderVars], ['result', renderResult], ['menu', mountMenus]]) guard(n, f); loadRefs().then(() => { renderSlots(); renderRefs(); }).catch(e => showErr('references', e)); });
 })();

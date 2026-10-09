@@ -6,7 +6,7 @@
 #is_fab.is-off{display:none}
 
 #is_panel{--is-op:.92;position:fixed;z-index:5000;right:14px;bottom:14px;width:min(440px,calc(100vw - 28px));
-  max-height:calc(100dvh - 28px);display:flex;flex-direction:column;overflow:hidden;
+  max-height:calc(100vh - 28px);max-height:calc(100dvh - 28px);display:flex;flex-direction:column;overflow:hidden;
   color:var(--SmartThemeBodyColor,#ddd);font-size:14px;line-height:1.35;
   border:1px solid var(--SmartThemeBorderColor,#555);border-radius:14px;
   background:rgba(28,28,34,var(--is-op));
@@ -51,7 +51,7 @@
 .is-var .is-ib{width:40px;height:40px}
 
 .is-result{margin-top:12px;text-align:center}
-.is-result img{max-width:100%;max-height:60dvh;border-radius:10px;display:block;margin:0 auto 8px}
+.is-result img{max-width:100%;max-height:60vh;max-height:60dvh;border-radius:10px;display:block;margin:0 auto 8px}
 .is-spin{display:inline-block;width:16px;height:16px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;
   animation:is-r .8s linear infinite;vertical-align:-3px;margin-right:6px}
 @keyframes is-r{to{transform:rotate(360deg)}}
@@ -63,14 +63,14 @@
 .is-card div{padding:6px 8px;font-size:12px;opacity:.85;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .is-empty{padding:24px 8px;text-align:center;opacity:.65}
 
-.is-lb{position:absolute;inset:0;z-index:5;display:none;flex-direction:column;padding:10px;gap:8px;overflow-y:auto;
+.is-lb{position:absolute;top:0;left:0;right:0;bottom:0;z-index:5;display:none;flex-direction:column;padding:10px;gap:8px;overflow-y:auto;
   background:rgba(12,12,16,.96)}
 .is-lb.on{display:flex}
-.is-lb img{max-width:100%;max-height:52dvh;object-fit:contain;margin:0 auto;border-radius:8px}
+.is-lb img{max-width:100%;max-height:52vh;max-height:52dvh;object-fit:contain;margin:0 auto;border-radius:8px}
 .is-lb pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;padding:8px;border-radius:8px;background:rgba(255,255,255,.06);max-height:22dvh;overflow:auto}
 
 @media (max-width:700px){
-  #is_panel{left:0;right:0;bottom:0;width:100%;max-height:none;height:88dvh;border-radius:16px 16px 0 0;border-bottom:0}
+  #is_panel{left:0;right:0;bottom:0;width:100%;max-height:none;height:88vh;height:88dvh;border-radius:16px 16px 0 0;border-bottom:0}
   #is_panel.is-min{height:auto}
   .is-body{padding-bottom:calc(14px + env(safe-area-inset-bottom,0px))}
   #is_fab{bottom:calc(86px + env(safe-area-inset-bottom,0px))}
