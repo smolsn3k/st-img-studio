@@ -73,8 +73,13 @@ Up to **4 characters** per image. Add them on the Create tab with **＋ Add char
   - **Image + text:** the picture is sent, and the text prompt is written in.
   - **Image only:** only the picture is sent.
   - **Text only:** no picture; only the text is used.
-- **Text prompt:** written in right after the first mention of the name, for example `personA (red hair, green eyes) kissing personB (blue hair)`. If the name isn't in the prompt, it is added as a "Character details" line instead.
-- **Negative prompt:** each character's negative is added to the negative prompt (not used for image-only characters).
+- **Text prompt:** how it's delivered depends on the model, so the model actually reads it:
+  - **Gemini, OpenAI-style, Naistera, SLAY:** the description is written in after the name (`personA (red hair, green eyes) kissing personB (blue hair)`) **and** listed in a "Characters (draw each exactly as described)" block at the end.
+  - **NovelAI V4 / V4.5 through sillyimages:** uses NovelAI's real character prompts. Your prompt is sent as `base | character 1 | character 2`, and each character's negative is sent in the matching position. Write the base as scene tags (`2girls, kissing`) and the character text as tags (`girl, red hair, green eyes`).
+  - **NovelAI through Standalone:** SillyTavern's own endpoint has no character prompts, so descriptions are appended to the prompt as tags.
+- **Negative prompt:** each character's negative follows the same rules (aligned per character for NovelAI V4, merged into the negative prompt otherwise). Not used for image-only characters.
+- **Image + text:** the picture usually wins if it disagrees with the text. Use **Text only** when the text must decide the look.
+- **See what was sent:** "Final prompt preview" shows it before you generate, and **Prompt that was sent** under each result shows it afterwards.
 - **Text-only characters** (no picture) can be created on the Refs tab with **＋ New text-only character**.
 - **Use as reference** on a result or a library image adds it as a reference, to keep a character consistent.
 - The **Send** checkbox turns all references off without clearing the slots.

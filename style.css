@@ -114,3 +114,7 @@
 @media (min-width:701px){.is-head{cursor:move;touch-action:none}.is-head button,.is-head input{cursor:pointer}}
 
 .is-slay-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;opacity:.8}
+
+.is-sent{text-align:left;margin-top:8px}
+.is-sent summary{font-size:12px;opacity:.75;cursor:pointer}
+.is-sent pre{white-space:pre-wrap;word-break:break-word;font-size:12px;margin:6px 0 0;padding:8px;border-radius:8px;background:rgba(255,255,255,.06)}

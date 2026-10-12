@@ -95,21 +95,52 @@
   const mentioned = (text, name) => nameRe(name).test(text || '');
   const modeOf = r => (r.image ? (r.mode || 'both') : 'text'); // 'both' | 'image' | 'text'
   const chars = () => S().refSlots.map(id => state.refs.find(r => r.id === id)).filter(Boolean).map(r => ({ r, mode: modeOf(r), name: isAuto(r.name) ? '' : r.name.trim() }));
-  // Text references: the character's prompt is written in after the first mention of the name (or listed at the end).
+  // Inline: "personA kissing personB" -> "personA (red hair…) kissing personB (blue hair…)" (first mention only)
   function expandChars(prompt, list) {
-    let out = prompt; const extra = [];
+    let out = prompt;
     for (const c of list) {
-      if (c.mode === 'image') continue;
-      const txt = String(c.r.description || '').replace(/\s+/g, ' ').trim(); if (!txt) continue;
-      if (c.name && mentioned(out, c.name)) out = out.replace(nameRe(c.name), (m, pre) => `${pre}${c.name} (${txt})`);
-      else extra.push(c.name ? `${c.name}: ${txt}` : txt);
+      if (c.mode === 'image' || !c.name) continue;
+      const txt = String(c.r.description || '').replace(/\s+/g, ' ').trim();
+      if (txt && mentioned(out, c.name)) out = out.replace(nameRe(c.name), (m, pre) => `${pre}${c.name} (${txt})`);
     }
-    return extra.length ? `${out}${out ? '\n\n' : ''}Character details: ${extra.join('; ')}.` : out;
+    return out;
+  }
+  // How text references are delivered depends on the model family:
+  //  'nai-chars' NovelAI V4/4.5 via sillyimages: "base | char1 | char2" (its character prompts), negatives aligned the same way
+  //  'nai-flat'  NovelAI via SillyTavern's own endpoint (no character prompts): descriptions appended as tags
+  //  'text'      Gemini / OpenAI-style / Naistera / SLAY: inline name (text) plus an explicit "Characters" block
+  function family() {
+    const s = S();
+    if (s.engine === 'standalone') return s.api === 'novelai' ? 'nai-flat' : 'text';
+    const ext = extCache[s.engine]; if (!ext || ext.kind === 'slay' || !ext.set) return 'text';
+    const prof = (ext.set.getSettings().connectionProfiles || []).find(p => p.id === s.profiles[ext.id]);
+    return prof?.apiType === 'novelai' ? 'nai-chars' : 'text';
   }
   function buildFinal() {
-    const s = S(), base = resolve(s.prompt), list = s.useRefs ? chars() : [];
-    const negs = list.filter(c => c.mode !== 'image').map(c => String(c.r.negative || '').trim()).filter(Boolean);
-    return { base, list, prompt: expandChars(base, list), neg: [resolve(s.negative), ...negs].filter(Boolean).join(', ') };
+    const s = S(), base = resolve(s.prompt), baseNeg = resolve(s.negative), list = s.useRefs ? chars() : [], fam = family();
+    const tx = list.filter(c => c.mode !== 'image').map(c => ({ c, txt: String(c.r.description || '').replace(/\s+/g, ' ').trim(), neg: String(c.r.negative || '').trim() })).filter(x => x.txt || x.neg);
+    const withTxt = tx.filter(x => x.txt);
+    let prompt = base, neg = baseNeg;
+    if (fam === 'nai-chars') {
+      prompt = [base, ...withTxt.map(x => x.txt)].join(' | ');
+      const loose = tx.filter(x => !x.txt && x.neg).map(x => x.neg);           // negative without a text prompt: goes to the base negative
+      const nb = [baseNeg, ...loose].filter(Boolean).join(', ');
+      neg = withTxt.some(x => x.neg) ? [nb, ...withTxt.map(x => x.neg)].join(' | ') : nb;
+    } else if (fam === 'nai-flat') {
+      prompt = [base, ...withTxt.map(x => x.txt)].filter(Boolean).join(', ');
+      neg = [baseNeg, ...tx.map(x => x.neg)].filter(Boolean).join(', ');
+    } else {
+      prompt = expandChars(base, list);
+      if (withTxt.length) prompt += `${prompt ? '\n\n' : ''}Characters (draw each exactly as described):\n${withTxt.map(x => `- ${x.c.name ? x.c.name + ': ' : ''}${x.txt}`).join('\n')}`;
+      neg = [baseNeg, ...tx.map(x => x.neg)].filter(Boolean).join(', ');
+    }
+    return { base, list, fam, prompt, neg };
+  }
+  function finalText(f, withImages) {
+    const sty = S().engine === 'slayimages' ? slayStyleNow() : '', imgs = f.list.filter(c => c.mode !== 'text');
+    const fmt = f.fam === 'nai-chars' ? 'Format: NovelAI character prompts  (base | character | character)\n\n' : '';
+    return fmt + (sty ? `[STYLE: ${sty}]\n\n` : '') + f.prompt + (f.neg ? `\n\n— Negative —\n${f.neg}` : '')
+      + (withImages && imgs.length ? `\n\n— Reference images —\n${imgs.map((c, i) => `${i + 1}. ${c.name || '(unnamed)'}`).join('\n')}` : '');
   }
   const slotRefs = () => S().refSlots.map(id => state.refs.find(r => r.id === id)).filter(Boolean);
   const refBlock = refs => {
@@ -232,7 +263,8 @@
     if (state.busy) { state.abort?.abort(); return; }
     syncVars();
     if (!state.refsLoaded) await loadRefs();
-    const { base, prompt, neg, list } = buildFinal();
+    if (s.engine !== 'standalone') await loadExt(s.engine);
+    const fin = buildFinal(), { base, prompt, neg, list } = fin;
     if (!base) return toast('warning', 'Main prompt is empty.');
     const imgs = list.filter(c => c.mode !== 'text');
     { const miss = imgs.map(c => c.name).filter(n => n && !mentioned(base, n)); if (miss.length) toast('info', `${miss.join(', ')} not in the prompt — the model may ignore ${miss.length > 1 ? 'those references' : 'that reference'}.`); }
@@ -241,7 +273,7 @@
     try {
       const sig = state.abort.signal;
       const url = s.engine !== 'standalone' ? await genExt(prompt, neg, sig) : s.api === 'novelai' ? await genNovelAI(prompt, neg, sig) : await genGemini(prompt, neg, sig);
-      state.last = { url, prompt, neg, saved: false };
+      state.last = { url, prompt, neg, saved: false, sent: finalText(fin, true) };
       if (s.autosave) await saveLast(true);
     } catch (e) {
       if (e.name !== 'AbortError') { console.error(e); toast('error', e.message || String(e)); }
@@ -574,7 +606,7 @@
       + opts.map(([id, l]) => `<option value="${esc(id)}">${esc(l)}</option>`).join('') + '<option value="__other__">Other…</option>';
     model.value = isCustom ? '__other__' : cur;
     custom.style.display = isCustom ? '' : 'none'; custom.value = isCustom ? cur : '';
-    renderSlayStyle();
+    renderSlayStyle(); renderPreview();
   }
 
   /* ---------- Rendering ---------- */
@@ -592,7 +624,7 @@
       </div>`).join('') || '<div class="is-hint">Type {style} (or any {name}) in the main prompt to create a variable.</div>';
     renderPreview();
   }
-  function renderPreview() { const el = $('#is_prev'); if (!el) return; const f = buildFinal(), sty = S().engine === 'slayimages' ? slayStyleNow() : ''; el.textContent = (sty ? `[STYLE: ${sty}]\n\n` : '') + f.prompt + (f.neg ? `\n\n— Negative —\n${f.neg}` : ''); }
+  function renderPreview() { const el = $('#is_prev'); if (!el) return; el.textContent = finalText(buildFinal(), true); }
 
   function renderResult() {
     const el = $('#is_result'), l = state.last;
@@ -601,7 +633,8 @@
     el.innerHTML = l ? `<img src="${l.url}" alt="Generated image">
       <div class="is-row"><button class="is-btn full" data-act="save" ${l.saved ? 'disabled' : ''}>${l.saved ? 'Saved' : 'Save to library'}</button>
       <button class="is-btn full" data-act="dl-last">Download</button></div>
-      <div class="is-row" style="margin-top:6px"><button class="is-btn full" data-act="res-ref">Use as reference</button></div>` : '';
+      <div class="is-row" style="margin-top:6px"><button class="is-btn full" data-act="res-ref">Use as reference</button></div>
+      <details class="is-sent"><summary>Prompt that was sent</summary><pre>${esc(l.sent || '')}</pre></details>` : '';
   }
 
   async function renderLibrary() {
@@ -694,7 +727,7 @@
           <div class="is-row" style="justify-content:space-between;margin-top:12px"><span class="is-l" style="margin:0">Character references <b id="is_refcount"></b></span><label class="is-l" style="margin:0"><input type="checkbox" data-k="useRefs"> Send</label></div>
           <div id="is_slots"></div>
           <div id="is_chips" class="is-chips"></div>
-          <div class="is-hint">Name each character, then write the names in your prompt: “personA kissing personB”. Each can be sent as <b>image + text</b>, <b>image only</b> or <b>text only</b>; the text prompt is written in after the name and the negative is added to the negative prompt. NovelAI ignores images but uses the text.</div>
+          <div class="is-hint">Name each character and use the names in your prompt: “personA kissing personB”. Each can be sent as <b>image + text</b>, <b>image only</b> or <b>text only</b>. Text prompts go in the way the model likes: NovelAI V4 gets real per-character prompts, other models get the description next to the name plus a “Characters” list. Check “Final prompt preview” to see it.</div>
           <details style="margin-top:10px"><summary class="is-hint" style="cursor:pointer">Final prompt preview</summary><pre id="is_prev" style="white-space:pre-wrap;font-size:12px"></pre></details>
           <button id="is_gen" class="is-btn pri full" style="margin-top:12px" data-act="gen">Generate</button>
           <div id="is_result" class="is-result"></div>
