@@ -20,7 +20,7 @@ Works on desktop and mobile (bottom sheet on phones, movable window on desktop).
 1. Copy the `image-studio` folder (the one containing `manifest.json`, `index.js`, `style.css`) into
    `SillyTavern/data/<your-user>/extensions/`.
 2. Restart or reload SillyTavern.
-3. Open the panel with the floating 🎨 button, the wand (✨) menu → **Image Studio**, or **Extensions → Image Studio → Open Image Studio**.
+3. Open the panel with the floating 🎨 button, the wand (✨) menu → **Image Studio**, or **Extensions → Image Studio → Open Image Studio**. The wand and Extensions entries are added as soon as SillyTavern builds those menus, even if that is late on a slow phone.
 
 ## The three choices on the Create tab
 
@@ -58,8 +58,10 @@ Set it up on the Setup tab.
 
 Write any `{name}` in the main or negative prompt and a variable is created automatically.
 
-- Type a value, or pick a saved option from the list.
-- **★** saves the current value as an option, **−** deletes the selected option, 🗑 removes the variable.
+- Type a value, or pick a saved option from the dropdown.
+- **★** saves the current value as a **named option** (name + content). Open **Edit saved options** under the variable to rename an option, change its content, use it or delete it. The dropdown shows the names; picking one writes its content into the prompt.
+- **Rename a variable** by tapping its name (the part in `{ }`). Every `{old}` in your prompt and negative prompt is renamed too.
+- 🗑 removes a variable.
 - Variables not used in the prompt are greyed out.
 - `{{char}}` and `{{user}}` still work.
 - **Final prompt preview** shows exactly what will be sent.
@@ -93,13 +95,22 @@ Notes:
 
 Both are stored in your **browser's storage** (IndexedDB), so they are per device and per browser, and are not synced.
 
-- **Library tab:** saved results with search. Open one to see the prompt, then **Use this prompt** (restores the template, negative prompt, variables, generator, profile, model and references), **Download**, **Use as reference** or **Delete**. An optional **auto-save** is on the Setup tab.
+- **Library tab:** saved results with search. Tap one to open it:
+  - **Name**, **Prompt (with {tags})** and **Negative** are editable. **Save changes** keeps your edits.
+  - **Use this prompt** restores the template, negative prompt, variable values, generator, profile, model and references (variables you already have keep their saved options).
+  - **Full size**, **Download**, **Use as reference**, **Export** (this one item) and **Delete**.
+  - An optional **auto-save** is on the Setup tab.
+- **Export / import:** the buttons at the top of the Library tab.
+  - **Export prompts** writes a small `.json` file with prompts, variables, models and character info, without pictures.
+  - **Export + images** also includes the pictures (the file can get large).
+  - **Import from file** adds the entries from a file made by Image Studio. Entries you already have are skipped. Prompt-only entries show a "T" placeholder and work like any other: open one and tap **Use this prompt**. Characters used by imported entries are added to the Refs tab too.
 - **Refs tab:** saved characters with name, text prompt, negative prompt and send mode.
 
 ## Interface
 
 - **Floating button:** drag it anywhere; its position is saved. Tap to open.
 - **Window:** on desktop, drag it by the header. On phones it is a bottom sheet.
+- **View full size:** tap a result (or its **⛶ View full size** button) to open it big. Tap the picture to zoom to 100% and scroll around, tap again to fit, ✕ or tap outside to close. ⬇ downloads it.
 - **◐ slider** (header): panel opacity, so you can see the chat behind it.
 - **▾** collapses the panel, **✕** closes it.
 - **Hide the floating button:** untick **Show floating 🎨 button** on the Setup tab or in the Extensions drawer. Reopen from the wand menu or Extensions drawer.
@@ -107,6 +118,7 @@ Both are stored in your **browser's storage** (IndexedDB), so they are per devic
 
 ## Troubleshooting
 
+- **Wand or Extensions entry missing:** wait a few seconds after SillyTavern loads (they are added once its menus exist). The floating button always works.
 - **A red "⚠ …" line under the tabs** means one part of the panel failed to load; the rest still works. Send that text when reporting a problem.
 - **Extension "(not found)":** use **Re-scan extensions and profiles** on the Setup tab. Image Studio finds sillyimages and SLAY Images through SillyTavern's installed-extensions list.
 - **NovelAI errors:** check that your NovelAI key is saved under API Connections.

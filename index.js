@@ -32,13 +32,15 @@
       if (o.siAspect !== undefined) o.aspectOverride = o.siAspect;
       delete o.provider; delete o.siProfile; delete o.siAspect;
     }
-    return fill(o, DEFAULTS);
+    fill(o, DEFAULTS);
+    if (Array.isArray(o.vars)) for (const v of o.vars) v.options = (Array.isArray(v.options) ? v.options : []).map(x => (typeof x === 'string' ? { name: x.length > 40 ? x.slice(0, 38) + '…' : x, value: x } : x));
+    return o;
   };
   const save = () => ctx().saveSettingsDebounced();
   const getPath = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
   const setPath = (o, p, v) => { const ks = p.split('.'); const l = ks.pop(); ks.reduce((a, k) => a[k], o)[l] = v; };
 
-  const state = { last: null, busy: false, abort: null, libFilter: '', lbId: null, refs: [], refsLoaded: false, toSlot: false, refT: {}, modelCache: {}, modelTried: {}, modelOther: false };
+  const state = { last: null, busy: false, abort: null, libFilter: '', lbId: null, varOpen: new Set(), lbEdit: null, lbItem: null, refs: [], refsLoaded: false, toSlot: false, refT: {}, modelCache: {}, modelTried: {}, modelOther: false };
 
   /* ---------- IndexedDB library ---------- */
   const DB = 'image_studio_lib', STORE = 'items';
@@ -285,7 +287,7 @@
     const s = S();
     const vars = {}; s.vars.forEach(v => vars[v.name] = v.value);
     await libPut({
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(),
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(), title: '',
       image: l.url, thumb: await makeThumb(l.url), template: s.prompt, negative: s.negative, vars,
       resolved: l.prompt, resolvedNeg: l.neg, refIds: s.useRefs ? [...s.refSlots] : [], engine: s.engine, api: s.api, profile: s.profiles[s.engine] || '', modelRaw: rawModel(),
       model: modelLabel(),
@@ -614,15 +616,28 @@
     const s = S(), used = syncVars(), usedLower = new Set([...used].map(x => x.toLowerCase()));
     $('#is_vars').innerHTML = s.vars.map((v, i) => `
       <div class="is-var ${usedLower.has(v.name.toLowerCase()) ? '' : 'unused'}" data-i="${i}">
-        <div class="is-var-h"><span>{${esc(v.name)}}</span><button class="is-ib" data-act="var-del" title="Remove variable">🗑</button></div>
+        <div class="is-var-h"><div class="is-row" style="flex:1;gap:2px"><span>{</span><input type="text" class="is-vname" data-act="var-name" value="${esc(v.name)}" maxlength="40" aria-label="Variable name" title="Tap to rename; {${esc(v.name)}} in your prompt is renamed too"><span>}</span></div><button class="is-ib" data-act="var-del" title="Remove variable">🗑</button></div>
         <input type="text" data-act="var-val" value="${esc(v.value)}" placeholder="value for {${esc(v.name)}}">
         <div class="is-row">
-          <select data-act="var-pick"><option value="">Saved options…</option>${v.options.map((o, k) => `<option value="${k}">${esc(o)}</option>`).join('')}</select>
-          <button class="is-ib" data-act="var-save" title="Save current value as option">★</button>
-          <button class="is-ib" data-act="var-rm" title="Delete selected option">−</button>
+          <select data-act="var-pick"><option value="">Saved options…</option>${v.options.map((o, k) => `<option value="${k}">${esc(o.name)}</option>`).join('')}</select>
+          <button class="is-ib" data-act="var-save" title="Save current value as a named option">★</button>
         </div>
+        <details class="is-opts" data-vn="${esc(v.name)}" ${state.varOpen.has(v.name) ? 'open' : ''}><summary>Edit saved options (${v.options.length})</summary>
+          ${v.options.map((o, k) => `<div class="is-opt" data-oi="${k}"><input type="text" data-act="opt-name" value="${esc(o.name)}" placeholder="Name"><textarea data-act="opt-val" placeholder="Content (what gets written into the prompt)">${esc(o.value)}</textarea><div class="is-row"><button class="is-btn full" data-act="opt-use">Use</button><button class="is-btn full" data-act="opt-del">Delete</button></div></div>`).join('') || '<div class="is-hint">Nothing saved yet. Type a value above and tap ★.</div>'}
+        </details>
       </div>`).join('') || '<div class="is-hint">Type {style} (or any {name}) in the main prompt to create a variable.</div>';
     renderPreview();
+  }
+  function renameVar(inp) {
+    const s = S(), v = s.vars[inp.closest('.is-var').dataset.i], old = v.name;
+    const nn = inp.value.trim().replace(/[^\w-]/g, '');
+    if (!nn || nn === old) { inp.value = old; return; }
+    if (s.vars.some(x => x !== v && x.name.toLowerCase() === nn.toLowerCase())) { toast('warning', `A variable named {${nn}} already exists.`); inp.value = old; return; }
+    const re = new RegExp('(?<!\\{)\\{' + old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\}(?!\\})', 'gi');
+    s.prompt = (s.prompt || '').replace(re, `{${nn}}`); s.negative = (s.negative || '').replace(re, `{${nn}}`);
+    for (const k of ['prompt', 'negative']) { const el = $(`[data-k="${k}"]`); if (el) el.value = s[k]; }
+    v.name = nn; if (state.varOpen.delete(old)) state.varOpen.add(nn);
+    save(); renderVars();
   }
   function renderPreview() { const el = $('#is_prev'); if (!el) return; el.textContent = finalText(buildFinal(), true); }
 
@@ -630,28 +645,67 @@
     const el = $('#is_result'), l = state.last;
     $('#is_gen').innerHTML = state.busy ? '<span class="is-spin"></span>Generating… tap to cancel' : 'Generate';
     if (state.busy) { el.innerHTML = ''; return; }
-    el.innerHTML = l ? `<img src="${l.url}" alt="Generated image">
+    el.innerHTML = l ? `<img src="${l.url}" alt="Generated image" data-act="view-last" title="Tap to view full size" style="cursor:zoom-in">
       <div class="is-row"><button class="is-btn full" data-act="save" ${l.saved ? 'disabled' : ''}>${l.saved ? 'Saved' : 'Save to library'}</button>
       <button class="is-btn full" data-act="dl-last">Download</button></div>
-      <div class="is-row" style="margin-top:6px"><button class="is-btn full" data-act="res-ref">Use as reference</button></div>
+      <div class="is-row" style="margin-top:6px"><button class="is-btn full" data-act="view-last">⛶ View full size</button><button class="is-btn full" data-act="res-ref">Use as reference</button></div>
       <details class="is-sent"><summary>Prompt that was sent</summary><pre>${esc(l.sent || '')}</pre></details>` : '';
   }
 
   async function renderLibrary() {
-    const items = (await libAll()).filter(i => !state.libFilter || (i.resolved + ' ' + i.template).toLowerCase().includes(state.libFilter));
-    $('#is_lib').innerHTML = items.length ? items.map(i => `<div class="is-card" data-id="${i.id}"><img loading="lazy" src="${i.thumb}" alt=""><div>${esc(i.resolved)}</div></div>`).join('')
-      : '<div class="is-empty" style="grid-column:1/-1">No saved images yet. Generate one and tap “Save to library”.</div>';
+    const items = (await libAll()).filter(i => !state.libFilter || ((i.title || '') + ' ' + i.resolved + ' ' + i.template).toLowerCase().includes(state.libFilter));
+    $('#is_lib').innerHTML = items.length ? items.map(i => `<div class="is-card" data-id="${i.id}">${i.thumb ? `<img loading="lazy" src="${i.thumb}" alt="">` : '<div class="is-noimg is-bigph">T</div>'}<div>${esc(i.title || i.resolved)}</div></div>`).join('')
+      : '<div class="is-empty" style="grid-column:1/-1">No saved prompts yet. Generate one and tap “Save to library”, or import a file.</div>';
   }
 
   async function openLightbox(id) {
     const it = (await libAll()).find(x => x.id === id); if (!it) return;
-    state.lbId = id;
-    $('#is_lb').innerHTML = `<img src="${it.image}" alt=""><pre>${esc(it.template)}\n\n→ ${esc(it.resolved)}</pre>
-      <div class="is-hint">${esc(it.model)} · ${new Date(it.ts).toLocaleString()}</div>
-      <div class="is-row"><button class="is-btn pri full" data-act="lb-use">Use this prompt</button><button class="is-btn full" data-act="lb-dl">Download</button></div>
-      <div class="is-row"><button class="is-btn full" data-act="lb-ref">Use as reference</button></div>
+    state.lbId = id; state.lbItem = it; state.lbEdit = { title: it.title || '', template: it.template || '', negative: it.negative || '' };
+    $('#is_lb').innerHTML = `${it.image ? `<img src="${it.image}" alt="" data-act="lb-view" title="Tap to view full size">` : '<div class="is-empty">Prompt only (no image)</div>'}
+      <div class="is-hint">${esc(it.model || '')} · ${new Date(it.ts).toLocaleString()}</div>
+      <label class="is-l">Name</label><input type="text" data-act="lb-title" value="${esc(state.lbEdit.title)}" placeholder="Untitled">
+      <label class="is-l">Prompt (with {tags})</label><textarea data-act="lb-tpl">${esc(state.lbEdit.template)}</textarea>
+      <label class="is-l">Negative</label><textarea data-act="lb-neg" style="min-height:56px">${esc(state.lbEdit.negative)}</textarea>
+      <details class="is-sent"><summary>Prompt that was sent</summary><pre>${esc(it.resolved || '')}</pre></details>
+      <div class="is-row"><button class="is-btn pri full" data-act="lb-save">Save changes</button><button class="is-btn full" data-act="lb-use">Use this prompt</button></div>
+      <div class="is-row">${it.image ? '<button class="is-btn full" data-act="lb-view">⛶ Full size</button><button class="is-btn full" data-act="lb-dl">Download</button>' : ''}</div>
+      <div class="is-row">${it.image ? '<button class="is-btn full" data-act="lb-ref">Use as reference</button>' : ''}<button class="is-btn full" data-act="lb-export">Export</button></div>
       <div class="is-row"><button class="is-btn full" data-act="lb-del">Delete</button><button class="is-btn full" data-act="lb-close">Close</button></div>`;
     $('#is_lb').classList.add('on');
+  }
+  async function exportLibrary(withImages, ids) {
+    if (!state.refsLoaded) await loadRefs();
+    const items = (await libAll()).filter(i => !ids || ids.includes(i.id));
+    if (!items.length) return toast('info', 'Nothing to export.');
+    const want = new Set(items.flatMap(i => i.refIds || []));
+    const refs = state.refs.filter(r => want.has(r.id)).map(r => ({ id: r.id, name: r.name, description: r.description || '', negative: r.negative || '', mode: r.mode || 'both', ...(withImages && r.image ? { image: r.image, thumb: r.thumb } : {}) }));
+    const data = { app: 'image-studio', format: 1, exported: new Date().toISOString(), includesImages: !!withImages, items: items.map(i => { const o = { ...i }; if (!withImages) { delete o.image; delete o.thumb; } return o; }), refs };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
+    download(url, `image-studio-${withImages ? 'with-images' : 'prompts'}-${new Date().toISOString().slice(0, 10)}.json`);
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
+    toast('success', `Exported ${items.length} item(s)${withImages ? ' with images' : ' (prompts only)'}.`);
+  }
+  async function importLibrary(inp) {
+    const file = inp.files[0]; inp.value = ''; if (!file) return;
+    let data; try { data = JSON.parse(await file.text()); } catch { return toast('error', 'That file is not valid JSON.'); }
+    const items = Array.isArray(data) ? data : data?.items;
+    if (!Array.isArray(items)) return toast('error', 'No library items found in that file.');
+    if (!state.refsLoaded) await loadRefs();
+    const have = new Set((await libAll()).map(i => i.id)); let added = 0, skipped = 0;
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object' || (!raw.template && !raw.resolved)) { skipped++; continue; }
+      if (raw.id && have.has(raw.id)) { skipped++; continue; }
+      const it = { vars: {}, negative: '', resolved: raw.template || '', refIds: [], model: '', ...raw, id: raw.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)), ts: Number(raw.ts) || Date.now(), image: raw.image || '', thumb: raw.thumb || (raw.image ? await makeThumb(raw.image) : '') };
+      await libPut(it); have.add(it.id); added++;
+    }
+    let addedRefs = 0;
+    for (const r of data?.refs || []) {
+      if (!r?.id || state.refs.some(x => x.id === r.id)) continue;
+      const rec = { id: r.id, ts: Date.now(), name: r.name || 'Reference', description: r.description || '', negative: r.negative || '', mode: r.mode || 'both', image: r.image || '', thumb: r.thumb || (r.image ? await makeThumb(r.image, 200) : '') };
+      await putRef(rec); state.refs.unshift(rec); addedRefs++;
+    }
+    renderLibrary(); renderRefs(); renderSlots();
+    toast(added ? 'success' : 'info', `Imported ${added} item(s)${skipped ? `, skipped ${skipped} already here or invalid` : ''}${addedRefs ? `, plus ${addedRefs} character(s)` : ''}.`);
   }
 
   function download(url, name) { const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
@@ -696,6 +750,7 @@
     if ($('#is_panel')) return;
     document.body.insertAdjacentHTML('beforeend', `
     <div id="is_fab" title="Image Studio">🎨</div>
+    <div id="is_viewer" class="is-viewer" style="display:none"><div class="is-viewer-bar"><button class="is-ib" data-vact="dl" title="Download">⬇</button><button class="is-ib" data-vact="close" title="Close">✕</button></div><div class="is-viewer-scroll"><img id="is_viewer_img" alt="Generated image"></div></div>
     <div id="is_panel" class="is-hidden">
       <div class="is-head">
         <span class="is-title">Image Studio</span>
@@ -733,6 +788,9 @@
           <div id="is_result" class="is-result"></div>
         </section>
         <section class="is-sec" data-tab="library">
+          <div class="is-row"><button class="is-btn full" data-act="lib-export">Export prompts</button><button class="is-btn full" data-act="lib-export-img">Export + images</button></div>
+          <button class="is-btn full" style="margin:6px 0" data-act="lib-import">Import from file</button>
+          <input type="file" id="is_impfile" accept="application/json,.json" hidden>
           <input type="text" id="is_search" placeholder="Search saved prompts">
           <div id="is_lib" class="is-lib"></div>
         </section>
@@ -776,6 +834,12 @@
       <div id="is_lb" class="is-lb"></div>
     </div>`);
     const p = $('#is_panel');
+    $('#is_viewer').addEventListener('click', (e) => {
+      const v = e.currentTarget, b = e.target.closest('[data-vact]');
+      if (b) { if (b.dataset.vact === 'close') closeViewer(); else download(v._url, `image-studio-${Date.now()}.png`); return; }
+      if (e.target.id === 'is_viewer_img') v.classList.toggle('zoom'); else closeViewer();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#is_viewer')?.style.display !== 'none') closeViewer(); });
 
     $('#is_fab').addEventListener('click', e => { const f = e.currentTarget; if (f._dragged || Date.now() - (f._tapAt || 0) < 700) return; toggle(); });
     $('#is_close').addEventListener('click', () => p.classList.add('is-hidden'));
@@ -792,11 +856,13 @@
       switch (b.dataset.act) {
         case 'gen': return generate();
         case 'save': return saveLast();
+        case 'view-last': if (state.last) openViewer(state.last.url); return;
         case 'dl-last': return download(state.last.url, `image-studio-${Date.now()}.png`);
         case 'var-add': { const n = $('#is_newvar').value.trim().replace(/[^\w-]/g, ''); if (n && !s.vars.some(x => x.name.toLowerCase() === n.toLowerCase())) { s.vars.push({ name: n, value: '', options: [] }); $('#is_newvar').value = ''; save(); renderVars(); } return; }
         case 'var-del': s.vars.splice(vi, 1); save(); return renderVars();
-        case 'var-save': if (v.value.trim() && !v.options.includes(v.value.trim())) { v.options.push(v.value.trim()); save(); renderVars(); } return;
-        case 'var-rm': { const k = b.closest('.is-var').querySelector('select').value; if (k !== '') { v.options.splice(+k, 1); save(); renderVars(); } return; }
+        case 'var-save': { const val = v.value.trim(); if (!val) return toast('info', 'Type a value first.'); if (v.options.some(o => o.value === val)) return toast('info', 'Already saved.'); v.options.push({ name: val.length > 40 ? val.slice(0, 38) + '…' : val, value: val }); state.varOpen.add(v.name); save(); renderVars(); return toast('success', 'Saved. Rename or edit it under “Edit saved options”.'); }
+        case 'opt-use': { const o = v.options[+b.closest('.is-opt').dataset.oi]; if (o) { v.value = o.value; save(); renderVars(); } return; }
+        case 'opt-del': { v.options.splice(+b.closest('.is-opt').dataset.oi, 1); save(); renderVars(); return; }
         case 'import': { const c = JSON.parse($('#is_import').dataset.list)[$('#is_imp_sel').value]; if (c) { s.gemini.endpoint = c.endpoint; s.gemini.key = c.key; if (c.model) s.gemini.model = c.model; s.engine = 'standalone'; s.api = 'gemini'; save(); applyUI(); renderConn(); toast('success', `Imported from ${c.name}.`); } return; }
         case 'si-refresh': for (const id of Object.keys(EXTS)) await loadExt(id, true); await renderConn(); return toast('info', 'Rescanned.');
         case 'model-fetch': return fetchProfileModels(false);
@@ -805,7 +871,7 @@
           const list = (si.set.getSettings().styles || []).filter(x => x.value);
           if (!list.length) return toast('info', 'No styles saved in sillyimages.');
           let sv = s.vars.find(x => x.name.toLowerCase() === 'style'); if (!sv) { sv = { name: 'style', value: '', options: [] }; s.vars.push(sv); }
-          list.forEach(x => { if (!sv.options.includes(x.value)) sv.options.push(x.value); });
+          list.forEach(x => { if (!sv.options.some(o => o.value === x.value)) sv.options.push({ name: String(x.name || x.title || x.value).slice(0, 40), value: x.value }); });
           save(); renderVars(); return toast('success', `Imported ${list.length} style(s) into {style}.`);
         }
         case 'slot-add': return openPicker();
@@ -829,12 +895,18 @@
         case 'lb-close': return $('#is_lb').classList.remove('on');
         case 'lb-dl': { const it = (await libAll()).find(x => x.id === state.lbId); if (it) download(it.image, `image-studio-${it.id}.png`); return; }
         case 'lb-del': if (confirm('Delete this image from the library?')) { await libDel(state.lbId); $('#is_lb').classList.remove('on'); renderLibrary(); } return;
+        case 'lb-save': { const it = state.lbItem; if (!it) return; Object.assign(it, state.lbEdit); await libPut(it); renderLibrary(); return toast('success', 'Saved.'); }
+        case 'lb-export': return exportLibrary(true, [state.lbId]);
+        case 'lb-view': { if (state.lbItem?.image) openViewer(state.lbItem.image); return; }
+        case 'lib-export': return exportLibrary(false);
+        case 'lib-export-img': return exportLibrary(true);
+        case 'lib-import': return $('#is_impfile').click();
         case 'lb-use': {
           const it = (await libAll()).find(x => x.id === state.lbId); if (!it) return;
-          s.prompt = it.template; s.negative = it.negative;
+          s.prompt = state.lbEdit?.template ?? it.template; s.negative = state.lbEdit?.negative ?? it.negative;
           if (it.engine) { s.engine = it.engine; s.api = it.api || s.api; if (it.profile) s.profiles[it.engine] = it.profile; if (it.engine === 'standalone') s[s.api].model = it.modelRaw || s[s.api].model; else if (it.profile) s.models[`${it.engine}:${it.profile}`] = it.modelRaw || ''; }
           else if (it.provider) { s.engine = it.provider === 'sillyimages' ? 'sillyimages' : 'standalone'; if (it.provider !== 'sillyimages') s.api = it.provider; }
-          s.vars = Object.entries(it.vars).map(([name, value]) => ({ options: [], ...(s.vars.find(x => x.name === name) || {}), name, value }));
+          for (const [name, value] of Object.entries(it.vars || {})) { const ex = s.vars.find(x => x.name === name); if (ex) ex.value = value; else s.vars.push({ name, value, options: [] }); }
           if (!state.refsLoaded) await loadRefs();
           s.refSlots = (it.refIds || []).filter(id => state.refs.some(r => r.id === id)).slice(0, MAX_REFS);
           if ((it.refIds || []).length > s.refSlots.length) toast('info', 'Some saved references no longer exist.');
@@ -843,8 +915,14 @@
       }
     });
 
+    p.addEventListener('toggle', (e) => { const d = e.target; if (d.classList?.contains('is-opts')) { if (d.open) state.varOpen.add(d.dataset.vn); else state.varOpen.delete(d.dataset.vn); } }, true);
     p.addEventListener('input', (e) => {
       const t = e.target, s = S();
+      if (t.dataset.act === 'opt-name' || t.dataset.act === 'opt-val') {
+        const box = t.closest('.is-var'), k = +t.closest('.is-opt').dataset.oi, o = s.vars[box.dataset.i].options[k]; if (!o) return;
+        if (t.dataset.act === 'opt-name') { o.name = t.value; const op = box.querySelector('[data-act="var-pick"]')?.options[k + 1]; if (op) op.textContent = t.value; } else o.value = t.value;
+        save(); return;
+      }
       if (t.dataset.act === 'var-val') { s.vars[t.closest('.is-var').dataset.i].value = t.value; save(); return renderPreview(); }
       if (t.dataset.act === 'model-custom') { setModel(t.value.trim()); return; }
       if (t.dataset.act === 'slot-name') {
@@ -852,6 +930,7 @@
         r.name = t.value.trim() || `Reference ${+t.closest('.is-slotrow').dataset.i + 1}`;
         clearTimeout(state.refT[r.id]); state.refT[r.id] = setTimeout(() => putRef(r), 400); renderChips(); return renderPreview();
       }
+      if (['lb-title', 'lb-tpl', 'lb-neg'].includes(t.dataset.act)) { if (state.lbEdit) state.lbEdit[{ 'lb-title': 'title', 'lb-tpl': 'template', 'lb-neg': 'negative' }[t.dataset.act]] = t.value; return; }
       if (['ref-name', 'ref-desc', 'ref-neg'].includes(t.dataset.act)) {
         const box = t.closest('[data-rid]'), id = box?.dataset.rid, r = state.refs.find(x => x.id === id); if (!r) return;
         r[{ 'ref-name': 'name', 'ref-desc': 'description', 'ref-neg': 'negative' }[t.dataset.act]] = t.value;
@@ -869,13 +948,23 @@
     p.addEventListener('change', (e) => {
       const t = e.target, s = S();
       if (t.id === 'is_file') return handleFiles(t);
+      if (t.id === 'is_impfile') return importLibrary(t);
       if (t.dataset.act === 'engine') { s.engine = t.value; state.modelOther = false; save(); applyUI(); return renderConn(); }
       if (t.dataset.act === 'conn') { if (s.engine === 'standalone') s.api = t.value; else s.profiles[s.engine] = t.value; state.modelOther = false; save(); applyUI(); return renderConn(); }
       if (t.dataset.act === 'ref-mode') { const r = state.refs.find(x => x.id === t.closest('[data-rid]')?.dataset.rid); if (r) { r.mode = t.value; putRef(r); renderSlots(); renderRefs(); } return; }
       if (t.dataset.act === 'model') { if (t.value === '__other__') { state.modelOther = true; $('#is_model_custom').style.display = ''; return; } state.modelOther = false; setModel(t.value); return renderConn(); }
-      if (t.dataset.act === 'var-pick' && t.value !== '') { const v = S().vars[t.closest('.is-var').dataset.i]; v.value = v.options[+t.value]; save(); renderVars(); }
+      if (t.dataset.act === 'var-name') return renameVar(t);
+      if (t.dataset.act === 'var-pick' && t.value !== '') { const v = S().vars[t.closest('.is-var').dataset.i]; v.value = v.options[+t.value].value; save(); renderVars(); }
     });
   }
+
+
+  /* ---------- full-size image viewer ---------- */
+  function openViewer(url) {
+    const v = $('#is_viewer'); if (!v || !url) return;
+    v.classList.remove('zoom'); $('#is_viewer_img').src = url; v._url = url; v.style.display = 'flex';
+  }
+  function closeViewer() { const v = $('#is_viewer'); if (v) { v.style.display = 'none'; $('#is_viewer_img').removeAttribute('src'); } }
 
   /* ---------- dragging (floating button + desktop window) ---------- */
   function dragify(el, handle, { skip, enabled, move, end, tap }) {
@@ -940,16 +1029,29 @@
     for (const [n, f] of [['layout', placePanel], ['settings', applyUI], ['variables', renderVars], ['result', renderResult], ['references', renderSlots], ['connection', renderConn]]) guard(n, f);
   }
 
-  function mountMenus(tries = 0) {
+  function showPanel() {
+    const p = $('#is_panel'); if (!p) return;
+    if (p.classList.contains('is-hidden')) toggle();
+    else { const s = S(); if (s.minimized) { s.minimized = false; save(); applyUI(); } }
+  }
+  // Adds our entries to SillyTavern's wand menu and Extensions drawer. Safe to call repeatedly; it only adds what is missing.
+  function mountMenus() {
     const menu = $('#extensionsMenu');
-    if (menu && !$('#is_menu_item')) menu.insertAdjacentHTML('beforeend', '<div id="is_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0"><div class="fa-solid fa-palette extensionsMenuExtensionButton"></div><span>Image Studio</span></div>');
-    const mi = $('#is_menu_item'); if (mi && !mi.dataset.bound) { mi.dataset.bound = 1; mi.addEventListener('click', () => { if ($('#is_panel').classList.contains('is-hidden')) toggle(); }); }
+    if (menu && !$('#is_menu_item')) menu.insertAdjacentHTML('beforeend', '<div id="is_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" role="button" style="cursor:pointer"><div class="fa-solid fa-palette extensionsMenuExtensionButton"></div><span>Image Studio</span></div>');
     const host = $('#extensions_settings2') || $('#extensions_settings');
-    if (host && !$('#is_settings')) host.insertAdjacentHTML('beforeend', `<div id="is_settings" class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Image Studio</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><label class="checkbox_label"><input type="checkbox" id="is_show_btn"><span>Show floating button</span></label><div class="menu_button" id="is_open_btn">Open Image Studio</div></div></div>`);
+    if (host && !$('#is_settings')) host.insertAdjacentHTML('beforeend', `<div id="is_settings" class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Image Studio</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><label class="checkbox_label"><input type="checkbox" id="is_show_btn"><span>Show floating button</span></label><div class="menu_button" id="is_open_btn" style="cursor:pointer">Open Image Studio</div></div></div>`);
     const sb = $('#is_show_btn'); if (sb && !sb.dataset.bound) { sb.dataset.bound = 1; sb.checked = S().showButton; sb.addEventListener('change', () => { S().showButton = sb.checked; save(); applyUI(); }); }
-    const ob = $('#is_open_btn'); if (ob && !ob.dataset.bound) { ob.dataset.bound = 1; ob.addEventListener('click', () => { if ($('#is_panel').classList.contains('is-hidden')) toggle(); }); }
-    if ((!menu || !host) && tries < 20) setTimeout(() => mountMenus(tries + 1), 500);
+  }
+  function setupEntryPoints() {
+    // Delegated on document, so it keeps working if SillyTavern rebuilds those menus. Touch: if no click arrives, fall back to pointerup.
+    let clickAt = 0; const sel = '#is_menu_item, #is_open_btn';
+    document.addEventListener('click', e => { if (e.target.closest?.(sel)) { clickAt = Date.now(); showPanel(); } }, true);
+    document.addEventListener('pointerup', e => { if (e.pointerType === 'mouse' || !e.target.closest?.(sel)) return; const t0 = Date.now(); setTimeout(() => { if (clickAt < t0) showPanel(); }, 450); }, true);
+    // The menus may not exist yet (or be rebuilt) on slow phones: keep checking, cheaply.
+    let timer = 0; const check = () => { timer = 0; guard('menu', mountMenus); };
+    new MutationObserver(() => { if (!timer) timer = setTimeout(check, 300); }).observe(document.body, { childList: true, subtree: true });
+    try { const c = ctx(); c.eventSource?.on(c.eventTypes.APP_READY, () => guard('menu', mountMenus)); } catch { /* ignore */ }
   }
 
-  jQuery(() => { build(); for (const [n, f] of [['drag', setupDrag], ['settings', applyUI], ['button', placeFab], ['layout', placePanel], ['variables', renderVars], ['result', renderResult], ['menu', mountMenus]]) guard(n, f); loadRefs().then(() => { renderSlots(); renderRefs(); }).catch(e => showErr('references', e)); });
+  jQuery(() => { build(); for (const [n, f] of [['drag', setupDrag], ['settings', applyUI], ['button', placeFab], ['layout', placePanel], ['variables', renderVars], ['result', renderResult], ['menu', mountMenus], ['entry', setupEntryPoints]]) guard(n, f); loadRefs().then(() => { renderSlots(); renderRefs(); }).catch(e => showErr('references', e)); });
 })();
