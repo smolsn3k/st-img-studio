@@ -17,10 +17,21 @@ Works on desktop and mobile (bottom sheet on phones, movable window on desktop).
 
 ## Install
 
-1. Copy the `image-studio` folder (the one containing `manifest.json`, `index.js`, `style.css`) into
-   `SillyTavern/data/<your-user>/extensions/`.
-2. Restart or reload SillyTavern.
-3. Open the panel with the floating 🎨 button, the wand (✨) menu → **Image Studio**, or **Extensions → Image Studio → Open Image Studio**. The wand and Extensions entries are added as soon as SillyTavern builds those menus, even if that is late on a slow phone.
+Install it from SillyTavern, no manual copying needed:
+
+1. In SillyTavern, open the **Extensions** panel (the puzzle-piece icon).
+2. Click **Install extension**.
+3. Paste this URL and confirm:
+
+   ```
+   https://github.com/smolsn3k/st-img-studio
+   ```
+
+4. Choose whether to install it **for all users** or **just for you**, then reload the page when asked.
+
+Open the panel with the floating 🎨 button, the wand (✨) menu → **Image Studio**, or **Extensions → Image Studio → Open Image Studio**. The wand and Extensions entries are added as soon as SillyTavern builds those menus, even if that is late on a slow phone.
+
+**Updating:** open **Extensions → Manage extensions** and use the update button next to Image Studio (or the update-all button), then reload.
 
 ## The three choices on the Create tab
 
@@ -28,19 +39,23 @@ Works on desktop and mobile (bottom sheet on phones, movable window on desktop).
 | --- | --- |
 | **Generator extension** | `sillyimages`, `SLAY Images`, or `Standalone` (Image Studio's own connection). |
 | **Connection profile** | A saved connection in that extension: API type, endpoint and key. For SLAY there is also "Current SLAY settings". |
-| **Model** | Picked from a list in the Studio, independent of the profile's own model. "Profile's model" uses the profile's. "Other…" lets you type an id. ↻ fetches the list from the connection. |
+| **Model** | Picked from a list that belongs to the chosen generator (see below), independent of the extension's own model. "Profile's model" uses the profile's. "Other…" lets you type an id. ↻ reloads the list. |
 
 A model can't change the connection. NovelAI direct and Gemini are different endpoints with different keys, so for "NovelAI in chat, Nano Banana in the Studio" you need a profile that points at a Nano Banana connection (a Gemini key, a proxy, or Naistera, which serves both). Your model choice is remembered per profile.
 
 ### sillyimages
 
-Profiles come from sillyimages' connection profiles. Image Studio borrows the chosen profile and your chosen model only while it generates, then puts sillyimages' settings back. Nothing is saved to sillyimages. Avoid starting a Studio generation at the exact moment a chat message is generating through sillyimages.
+Profiles come from sillyimages' connection profiles. The model list is what sillyimages' own provider returns for the chosen profile (the same list its settings page shows), with its own names, so you only ever see sillyimages models.
+
+**The Studio never changes sillyimages.** For each generation or list lookup it works on a private copy of sillyimages' settings (the chosen profile's connection plus your Studio model). sillyimages' real settings are not written to, and if SillyTavern saves settings while a generation is running, the original values are what get saved. Your chat model and connection stay exactly as you set them. One thing to avoid: starting an image from chat through sillyimages at the very moment a Studio image is generating, since sillyimages would briefly read the Studio's copy.
 
 The Setup tab has **Import the extension's styles as {style} options**, which copies your sillyimages styles into the `{style}` variable.
 
 ### SLAY Images
 
 SLAY exposes no API to other extensions, so Image Studio builds the requests itself from SLAY's settings. Supported: OpenAI-compatible, Gemini, Naistera and custom URL connections.
+
+The model list for a SLAY connection is built the same way SLAY builds its own: from the connection's model list (Naistera uses SLAY's fixed list). Image Studio never writes to SLAY's connection or model.
 
 - **🎨 Choose style** opens SLAY's own style gallery. The chosen style is added to your prompt as a `[STYLE: …]` block, the same format SLAY uses. It also shows in the final prompt preview. **✕** clears it.
 - By default the Studio keeps its own style and puts SLAY's chat style back afterwards. Tick **Share with chat** to use SLAY's current style instead.
@@ -128,4 +143,4 @@ Both are stored in your **browser's storage** (IndexedDB), so they are per devic
 
 ## Credits
 
-Built to work alongside [sillyimages](https://github.com/0xl0cal/sillyimages) and [SLAYimages](https://github.com/wewwaistyping/SLAYimages).
+Made by [smolsn3k](https://github.com/smolsn3k). Built to work alongside [sillyimages](https://github.com/0xl0cal/sillyimages) and [SLAYimages](https://github.com/wewwaistyping/SLAYimages).

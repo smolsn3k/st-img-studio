@@ -306,7 +306,6 @@
   const GEMINI_MODELS = [['gemini-2.5-flash-image', 'Nano Banana (2.5 Flash Image)'], ['gemini-3-pro-image-preview', 'Nano Banana Pro (3 Pro Image)'], ['gemini-3.1-flash-image-preview', 'Nano Banana 2 (3.1 Flash Image)']];
   const NAISTERA_MODELS = [['nano banana', 'Nano Banana'], ['nano banana pro', 'Nano Banana Pro'], ['nano banana 2', 'Nano Banana 2'], ['grok', 'Grok']];
   const NAI_MODELS = [['nai-diffusion-4-5-full', 'NovelAI V4.5 Full'], ['nai-diffusion-4-5-curated', 'NovelAI V4.5 Curated'], ['nai-diffusion-4-full', 'NovelAI V4 Full']];
-  const STATIC_TYPES = ['novelai', 'gemini', 'naistera'];
   const extCache = {}; let discovered;
   const extLoading = {}; let discoverP;
   const NAME_HINT = { sillyimages: /silly.?images|inline.?image|iig/i, slayimages: /slay/i };
@@ -353,21 +352,34 @@
   const mkey = () => { const s = S(); return `${s.engine}:${s.profiles[s.engine] || ''}`; };
   const getProfile = (ext, st) => (st.connectionProfiles || []).find(p => p.id === S().profiles[ext.id]);
 
-  // Temporarily load the chosen profile (connection) + Studio's own model into the extension's live settings. Returns a restore fn.
-  function applyConn(ext, st, modelOverride) {
-    const backup = ext.set.extractConnectionFields(st), profile = getProfile(ext, st);
-    if (profile) for (const k of ext.set.CONNECTION_FIELDS) if (k in profile) st[k] = profile[k];
-    const m = String(modelOverride ?? S().models[mkey()] ?? '').trim();
-    if (m) { if (st.apiType === 'naistera') st.naisteraModel = m; else st.model = m; }
-    return () => Object.assign(st, backup);
+  // Runs fn on a PRIVATE COPY of the generator extension's settings (chosen profile's connection + Studio's own model).
+  // The extension's real settings object is never modified. While the copy is in place, anything SillyTavern saves still
+  // serialises the original values (toJSON), so the main extension's model/connection can't be changed or persisted by the Studio.
+  // Calls are queued one at a time so copies can never overlap.
+  let isoQueue = Promise.resolve();
+  function withIsolated(ext, modelOverride, fn) {
+    const run = isoQueue.then(async () => {
+      const es = ctx().extensionSettings, orig = ext.set.getSettings();
+      const key = Object.keys(es).find(k => es[k] === orig);
+      if (!key) throw new Error('Could not locate the extension settings.');
+      const clone = structuredClone(orig), profile = getProfile(ext, orig);
+      if (profile) for (const k of ext.set.CONNECTION_FIELDS) if (k in profile) clone[k] = structuredClone(profile[k]);
+      const m = String(modelOverride ?? S().models[mkey()] ?? '').trim();
+      if (m) { if (clone.apiType === 'naistera') clone.naisteraModel = m; else clone.model = m; }
+      Object.defineProperty(clone, 'toJSON', { value: () => orig, enumerable: false });
+      es[key] = clone;
+      try { return await fn(clone); } finally { es[key] = orig; }
+    });
+    isoQueue = run.catch(() => {});
+    return run;
   }
 
   async function genExt(prompt, neg, signal) {
     const s = S(), ext = await loadExt(s.engine);
     if (!ext) throw new Error(`${EXTS[s.engine]?.label || 'Generator extension'} not found. Install it or switch to Standalone.`);
     if (ext.kind === 'slay') return genSlay(prompt, neg, signal);
-    const st = ext.set.getSettings(), restore = applyConn(ext, st);
-    try {
+    const pick = String(s.models[mkey()] || '').trim();
+    return withIsolated(ext, undefined, async (st) => {
       const provider = ext.prov.resolveActiveProvider(st);
       if (!provider) throw new Error(`Unknown API type in profile: ${st.apiType}`);
       const errs = provider.validate(st);
@@ -382,10 +394,11 @@
       const rb = refBlock(references); if (rb) text += '\n\n' + rb;
       const options = { signal, negativePrompt: neg, matchedAdditionalRefs: [], characterDescriptionPromptBlock: '' };
       if (s.aspectOverride) options.aspectRatio = s.aspectOverride;
+      if (pick) options.model = pick; // providers that take a per-call model use it directly
       const out = await provider.generate({ prompt: text, style: '', references, options });
       if (typeof out !== 'string') throw new Error('Provider returned a video/non-image result.');
       return out;
-    } finally { restore(); }
+    });
   }
 
 
@@ -491,14 +504,13 @@
     try {
       if (['custom', 'naistera'].includes(c.apiType)) { if (!silent) toast('info', 'This connection type has no model list. Use the list or “Other…”.'); return; }
       if (!c.endpoint || !key) throw new Error('endpoint / key missing in the SLAY connection');
-      const base = trimEp(c.endpoint), gem = c.apiType === 'gemini';
-      const headers = gem && /googleapis\.com/.test(base) ? { 'x-goog-api-key': key } : { Authorization: `Bearer ${key}` };
-      const r = await fetch(gem ? `${base}/v1beta/models?pageSize=200` : `${base}/v1/models`, { headers });
+      const base = trimEp(c.endpoint), google = /googleapis\.com/.test(base);
+      // same source SLAY's own dropdown uses: the connection's /v1/models (Google's own endpoint uses /v1beta/models + key header)
+      const r = await fetch(google ? `${base}/v1beta/models?pageSize=200` : `${base}/v1/models`, { headers: google ? { 'x-goog-api-key': key } : { Authorization: `Bearer ${key}` } });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json();
-      let ids = gem ? (j.models || []).map(m => String(m.name || '').replace(/^models\//, '')) : (j.data || []).map(m => m.id);
-      ids = ids.filter(Boolean); if (gem) ids = ids.filter(i => /image/i.test(i));
-      const img = /image|imagen|dall|flux|diffusion|banana|seedream|midjourney|sdxl|draw|paint/i; // likely image models first
+      const ids = (google ? (j.models || []).map(m => String(m.name || '').replace(/^models\//, '')) : (j.data || []).map(m => m.id)).filter(Boolean);
+      const img = /image|imagen|dall|flux|diffusion|banana|seedream|midjourney|sdxl|draw|paint|recraft|grok-imagine/i; // likely image models first, nothing hidden
       state.modelCache[k] = [...ids.filter(i => img.test(i)).sort(), ...ids.filter(i => !img.test(i)).sort()];
       if (!silent) toast('success', `${state.modelCache[k].length} model(s) found.`);
     } catch (e) { if (!silent) toast('error', 'Could not fetch models: ' + (e.message || e)); }
@@ -534,21 +546,26 @@
     if (EXTS[S().engine]?.kind === 'slay') return fetchSlayModels(silent);
     const s = S(), ext = await loadExt(s.engine); if (!ext) return;
     const k = mkey(); state.modelTried[k] = true;
-    const st = ext.set.getSettings(), restore = applyConn(ext, st, '');
-    try { const list = await ext.prov.resolveActiveProvider(st).fetchModels(); state.modelCache[k] = list; if (!silent) toast('success', `${list.length} model(s) found.`); }
-    catch (e) { if (!silent) toast('error', 'Could not fetch models: ' + (e.message || e)); } finally { restore(); }
+    try {
+      const list = await withIsolated(ext, '', async (st) => {
+        const provider = ext.prov.resolveActiveProvider(st);
+        if (!provider || (st.rawEndpoint && st.apiType !== 'naistera')) return [];
+        return (await provider.fetchModels()).map(id => [id, provider.getModelLabel?.(id) || id]);
+      });
+      state.modelCache[k] = list;
+      if (!silent) toast(list.length ? 'success' : 'info', list.length ? `${list.length} model(s) found.` : 'This connection returned no models.');
+    } catch (e) { if (!silent) toast('error', 'Could not fetch models: ' + (e.message || e)); }
     renderConn();
   }
   const setModel = (v) => { const s = S(); if (s.engine === 'standalone') s[s.api].model = v; else s.models[mkey()] = v; save(); };
+  // The list is tied to the chosen generator: sillyimages -> what sillyimages' own provider returns for the chosen profile;
+  // SLAY -> its own Naistera list or the models its connection reports; Standalone -> built-in suggestions.
   function modelOptions(ext, type) {
     const s = S(); let base = [];
     if (s.engine === 'standalone') base = s.api === 'novelai' ? NAI_MODELS : GEMINI_MODELS;
-    else if (ext?.kind === 'slay') base = type === 'gemini' ? GEMINI_MODELS : type === 'naistera' ? SLAY_NAISTERA_MODELS : [];
-    else if (type === 'novelai') base = Object.entries(ext.nai?.NOVELAI_MODELS || {}).length ? Object.entries(ext.nai.NOVELAI_MODELS) : NAI_MODELS;
-    else if (type === 'gemini') base = GEMINI_MODELS;
-    else if (type === 'naistera') base = NAISTERA_MODELS;
+    else if (ext?.kind === 'slay') base = type === 'naistera' ? SLAY_NAISTERA_MODELS : [];
     const seen = new Set(base.map(x => x[0]));
-    for (const id of state.modelCache[mkey()] || []) if (!seen.has(id)) { seen.add(id); base = [...base, [id, id]]; }
+    for (const m of state.modelCache[mkey()] || []) { const [id, label] = Array.isArray(m) ? m : [m, m]; if (!seen.has(id)) { seen.add(id); base = [...base, [id, label]]; } }
     return base;
   }
 
@@ -599,8 +616,8 @@
         defLabel = `Profile's model: ${(type === 'naistera' ? prof?.naisteraModel : prof?.model) || 'not set'}`;
       }
       opts = modelOptions(ext, type);
-      if (prof && !STATIC_TYPES.includes(type) && !state.modelTried[mkey()]) fetchProfileModels(true); // auto-load list for proxies / OpenAI-style APIs
-      hint.textContent = 'The profile supplies endpoint, key and API type. The model chosen here is used only by Image Studio.';
+      if (prof && !(ext.kind === 'slay' && ['naistera', 'custom'].includes(type)) && !state.modelTried[mkey()]) fetchProfileModels(true); // load the extension's own list once
+      hint.textContent = `The list comes from ${EXTS[s.engine].label} for this profile. Your pick is used only by Image Studio and never changes ${EXTS[s.engine].label}'s own model.`;
     }
     const cur = rawModel(), known = opts.map(o => o[0]);
     const isCustom = state.modelOther || (cur && !known.includes(cur));
