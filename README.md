@@ -10,7 +10,8 @@ Works on desktop and mobile (bottom sheet on phones, movable window on desktop).
 - **Prompt with swappable `{tags}`.** Write `1girl, {style}, {quality}` and change each part from a field.
 - **Character references (up to 4).** Name them, then write `personA kissing personB`.
 - **Image, text, or both per reference.** Each character has its own text prompt and negative prompt.
-- **Reference library.** Saved characters you can reuse in any generation.
+- **Pose reference.** A pose picture and/or the pose in words, with its own negative. Saved poses are reusable.
+- **Reference library.** Saved characters and poses you can reuse in any generation.
 - **Image library.** Save a result together with the prompt, variables, model and references that made it.
 - **SLAY style button** that opens SLAY Images' own style gallery.
 - **Movable floating button, opacity slider, collapsible panel.**
@@ -106,6 +107,19 @@ Notes:
 - Models that accept fewer than 4 reference images use the first ones and tell you.
 - Pictures are shrunk to 1024px and sent as PNG.
 
+## Pose reference
+
+One pose per image, set on the Create tab under **Pose reference** (**＋ Add pose reference**, then pick a saved pose or upload one). Saved poses live on the **Refs** tab under **Poses**.
+
+- **Picture:** a photo, stick figure, mannequin or openpose image. It is sent with an instruction to copy **only** the body pose, limb placement and camera angle, and to ignore the person, face, clothing and background in it.
+- **Text:** the pose in words (`sitting cross-legged, looking over shoulder, hand on cheek`), plus an optional **negative** for the pose (`crossed arms`).
+- **Send as:** **Image + text**, **Image only** or **Text only**, same as characters. Text-only poses need no picture (**＋ New text-only pose** on the Refs tab).
+- **Where the text goes:** Gemini, OpenAI-style, Naistera and SLAY get a `Pose: …` line at the end of the prompt. NovelAI gets the pose text appended to the base prompt as tags, and its negative is added to the negative prompt.
+- **Image limits:** the pose picture counts toward the model's reference-image limit, after your characters. If the limit is reached, the picture is skipped (you get a notice) and its text is still used.
+- **NovelAI** can't take reference images, so only the pose text is used.
+- **Use as pose** on a result or a library image turns it into the pose reference.
+- The **Send** checkbox next to Pose reference turns the pose off without removing it. Saved library entries remember their pose, and export/import carries it along.
+
 ## Libraries
 
 Both are stored in your **browser's storage** (IndexedDB), so they are per device and per browser, and are not synced.
@@ -119,7 +133,7 @@ Both are stored in your **browser's storage** (IndexedDB), so they are per devic
   - **Export prompts** writes a small `.json` file with prompts, variables, models and character info, without pictures.
   - **Export + images** also includes the pictures (the file can get large).
   - **Import from file** adds the entries from a file made by Image Studio. Entries you already have are skipped. Prompt-only entries show a "T" placeholder and work like any other: open one and tap **Use this prompt**. Characters used by imported entries are added to the Refs tab too.
-- **Refs tab:** saved characters with name, text prompt, negative prompt and send mode.
+- **Refs tab:** saved characters and poses (switch with **Characters / Poses**), each with name, text prompt, negative prompt and send mode.
 
 ## Interface
 

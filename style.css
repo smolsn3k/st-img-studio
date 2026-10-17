@@ -131,3 +131,5 @@
 .is-viewer.zoom .is-viewer-scroll img{max-width:none;max-height:none;cursor:zoom-out}
 .is-viewer-bar{position:absolute;top:calc(8px + env(safe-area-inset-top,0px));right:10px;z-index:2;display:flex;gap:8px}
 .is-viewer-bar .is-ib{width:44px;height:44px;font-size:18px;background:rgba(0,0,0,.65);color:#fff;border-color:rgba(255,255,255,.35)}
+
+.is-btn.on{background:var(--SmartThemeQuoteColor,#3b6fd4);color:#fff;border-color:transparent;font-weight:600}

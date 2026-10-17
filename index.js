@@ -11,7 +11,7 @@
   const toast = (type, msg) => { try { window.toastr?.[type](msg, 'Image Studio'); } catch { console.log(msg); } };
 
   const DEFAULTS = {
-    engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, extPaths: {}, slayStyle: '', slayStyleName: '', slayShare: false, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true,
+    engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, extPaths: {}, slayStyle: '', slayStyleName: '', slayShare: false, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true, poseId: '', usePose: true,
     gemini: { endpoint: 'https://generativelanguage.googleapis.com', key: '', model: 'gemini-2.5-flash-image', aspect: '2:3', size: '1K' },
     novelai: { model: 'nai-diffusion-4-5-full', sampler: 'k_euler_ancestral', scheduler: 'karras', steps: 28, scale: 5, width: 832, height: 1216, seed: -1, decrisper: false, variety: false },
     prompt: '1girl, {style}, {quality}',
@@ -40,7 +40,7 @@
   const getPath = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
   const setPath = (o, p, v) => { const ks = p.split('.'); const l = ks.pop(); ks.reduce((a, k) => a[k], o)[l] = v; };
 
-  const state = { last: null, busy: false, abort: null, libFilter: '', lbId: null, varOpen: new Set(), lbEdit: null, lbItem: null, refs: [], refsLoaded: false, toSlot: false, refT: {}, modelCache: {}, modelTried: {}, modelOther: false };
+  const state = { last: null, busy: false, abort: null, libFilter: '', lbId: null, refKind: 'character', pickKind: 'character', varOpen: new Set(), lbEdit: null, lbItem: null, refs: [], refsLoaded: false, toSlot: false, refT: {}, modelCache: {}, modelTried: {}, modelOther: false };
 
   /* ---------- IndexedDB library ---------- */
   const DB = 'image_studio_lib', STORE = 'items';
@@ -68,13 +68,14 @@
   async function loadRefs() { state.refs = ((await dbDo('readonly', s => s.getAll(), REFS)) || []).sort((a, b) => b.ts - a.ts); state.refsLoaded = true; }
   const putRef = r => dbDo('readwrite', s => s.put(r), REFS);
   const refLabel = r => { const auto = /^Reference \d+$/.test(r.name); return r.description ? (auto ? r.description : `${r.name}: ${r.description}`) : (auto ? '' : r.name); };
-  async function addRef(dataUrl, name) {
-    const image = await normalizeImg(dataUrl);
-    const rec = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), name: name || `Reference ${state.refs.length + 1}`, description: '', negative: '', mode: 'both', image, thumb: await makeThumb(image, 200) };
+  async function addRef(dataUrl, name, kind = 'character') {
+    const image = await normalizeImg(dataUrl), n = state.refs.filter(r => (r.kind || 'character') === kind).length + 1;
+    const rec = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), kind, name: name || (kind === 'pose' ? `Pose ${n}` : `Reference ${n}`), description: '', negative: '', mode: 'both', image, thumb: await makeThumb(image, 200) };
     await putRef(rec); state.refs.unshift(rec); return rec;
   }
-  async function addTextRef() {
-    const rec = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), name: `Reference ${state.refs.length + 1}`, description: '', negative: '', mode: 'text', image: '', thumb: '' };
+  async function addTextRef(kind = 'character') {
+    const n = state.refs.filter(r => (r.kind || 'character') === kind).length + 1;
+    const rec = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), kind, name: kind === 'pose' ? `Pose ${n}` : `Reference ${n}`, description: '', negative: '', mode: 'text', image: '', thumb: '' };
     await putRef(rec); state.refs.unshift(rec); return rec;
   }
   const thumbHtml = (r, cls = '') => r.thumb ? `<img class="${cls}" src="${r.thumb}" alt="">` : `<div class="is-noimg ${cls}">T</div>`;
@@ -86,10 +87,15 @@
   }
   async function buildRefs(fmt, max) {
     if (!state.refsLoaded) await loadRefs();
-    const list = chars().filter(c => c.mode !== 'text'), used = list.slice(0, Math.min(max, MAX_REFS));
+    const list = S().useRefs ? chars().filter(c => c.mode !== 'text') : [], cap = Math.min(max, MAX_REFS + 1), used = list.slice(0, cap);
     if (list.length > used.length) toast('warning', `This model takes ${used.length} reference image(s); using the first ${used.length}.`);
     const out = used.map(c => ({ image: fmt === 'dataUrl' ? c.r.image : c.r.image.split(',')[1], description: c.name, source: 'image-studio' }));
     out.names = used.map(c => c.name);
+    const pose = poseNow();
+    if (pose?.hasImg) {
+      if (out.length < cap) { out.push({ image: fmt === 'dataUrl' ? pose.r.image : pose.r.image.split(',')[1], description: POSE_LABEL, source: 'image-studio', pose: true }); out.names.push(''); out.poseIndex = out.length - 1; }
+      else toast('warning', `This model takes ${cap} reference image(s); the pose picture was skipped${pose.txt ? ' (its text is still used)' : ''}.`);
+    }
     return out;
   }
   const isAuto = n => !String(n || '').trim() || /^Reference \d+$/.test(String(n).trim());
@@ -119,13 +125,16 @@
     return prof?.apiType === 'novelai' ? 'nai-chars' : 'text';
   }
   function buildFinal() {
-    const s = S(), base = resolve(s.prompt), baseNeg = resolve(s.negative), list = s.useRefs ? chars() : [], fam = family();
+    const s = S(), base0 = resolve(s.prompt), list = s.useRefs ? chars() : [], fam = family(), pose = poseNow();
+    const pTxt = pose && pose.mode !== 'image' ? pose.txt : '', pNeg = pose && pose.mode !== 'image' ? pose.neg : '';
+    const baseNeg = [resolve(s.negative), pNeg].filter(Boolean).join(', ');
     const tx = list.filter(c => c.mode !== 'image').map(c => ({ c, txt: String(c.r.description || '').replace(/\s+/g, ' ').trim(), neg: String(c.r.negative || '').trim() })).filter(x => x.txt || x.neg);
     const withTxt = tx.filter(x => x.txt);
+    const base = fam === 'text' ? base0 : [base0, pTxt].filter(Boolean).join(', '); // NovelAI: pose tags go into the base caption
     let prompt = base, neg = baseNeg;
     if (fam === 'nai-chars') {
       prompt = [base, ...withTxt.map(x => x.txt)].join(' | ');
-      const loose = tx.filter(x => !x.txt && x.neg).map(x => x.neg);           // negative without a text prompt: goes to the base negative
+      const loose = tx.filter(x => !x.txt && x.neg).map(x => x.neg);
       const nb = [baseNeg, ...loose].filter(Boolean).join(', ');
       neg = withTxt.some(x => x.neg) ? [nb, ...withTxt.map(x => x.neg)].join(' | ') : nb;
     } else if (fam === 'nai-flat') {
@@ -134,21 +143,36 @@
     } else {
       prompt = expandChars(base, list);
       if (withTxt.length) prompt += `${prompt ? '\n\n' : ''}Characters (draw each exactly as described):\n${withTxt.map(x => `- ${x.c.name ? x.c.name + ': ' : ''}${x.txt}`).join('\n')}`;
+      if (pTxt) prompt += `${prompt ? '\n\n' : ''}Pose: ${pTxt}`;
       neg = [baseNeg, ...tx.map(x => x.neg)].filter(Boolean).join(', ');
     }
-    return { base, list, fam, prompt, neg };
+    return { base: base0, list, fam, prompt, neg, pose };
   }
   function finalText(f, withImages) {
     const sty = S().engine === 'slayimages' ? slayStyleNow() : '', imgs = f.list.filter(c => c.mode !== 'text');
     const fmt = f.fam === 'nai-chars' ? 'Format: NovelAI character prompts  (base | character | character)\n\n' : '';
     return fmt + (sty ? `[STYLE: ${sty}]\n\n` : '') + f.prompt + (f.neg ? `\n\n— Negative —\n${f.neg}` : '')
-      + (withImages && imgs.length ? `\n\n— Reference images —\n${imgs.map((c, i) => `${i + 1}. ${c.name || '(unnamed)'}`).join('\n')}` : '');
+      + (withImages && (imgs.length || f.pose?.hasImg) ? `\n\n— Reference images —\n${[...imgs.map((c, i) => `${i + 1}. ${c.name || '(unnamed)'}`), ...(f.pose?.hasImg ? [`${imgs.length + 1}. POSE: ${f.pose.r.name}`] : [])].join('\n')}` : '');
   }
+  const POSE_LABEL = "POSE reference only — copy only the body pose, limb placement and camera angle; ignore this image's person, face, clothing and background";
+  const POSE_INSTR = "The pose reference image shows ONLY the desired pose: copy its body position, limb placement, head angle and camera angle. Do not copy that image's person, face, hair, clothing or background.";
+  const refInstr = refs => { const hasChar = refs.some(r => !r.pose), hasPose = refs.some(r => r.pose); return [hasChar ? (hasPose ? REF_INSTR.replace('The reference image(s) above show', 'The character reference image(s) above show') : REF_INSTR) : '', hasPose ? POSE_INSTR : ''].filter(Boolean).join(' '); };
+  const poseNow = () => {
+    const s = S(); if (!s.usePose || !s.poseId) return null;
+    const r = state.refs.find(x => x.id === s.poseId); if (!r) return null;
+    const mode = modeOf(r);
+    return { r, mode, txt: String(r.description || '').replace(/\s+/g, ' ').trim(), neg: String(r.negative || '').trim(), hasImg: mode !== 'text' && !!r.image };
+  };
+  const wantsImages = () => (S().useRefs && chars().some(c => c.mode !== 'text')) || !!poseNow()?.hasImg;
+  function setPose(id) { const s = S(); s.poseId = id; save(); renderPose(); renderPreview(); }
   const slotRefs = () => S().refSlots.map(id => state.refs.find(r => r.id === id)).filter(Boolean);
   const refBlock = refs => {
-    const parts = (refs.names || []).map((n, i) => n ? `image ${i + 1} is ${n}` : '').filter(Boolean);
-    return parts.length ? `Characters in the reference images: ${parts.join('; ')}. Wherever the prompt mentions one of these names, draw that character exactly as shown in their reference image.` : '';
+    const out = [], parts = (refs.names || []).map((n, i) => n ? `image ${i + 1} is ${n}` : '').filter(Boolean);
+    if (parts.length) out.push(`Characters in the reference images: ${parts.join('; ')}. Wherever the prompt mentions one of these names, draw that character exactly as shown in their reference image.`);
+    if (refs.poseIndex != null) out.push(`Image ${refs.poseIndex + 1} is a POSE reference: reproduce only its body pose, limb placement and camera angle. Do not copy that image's person, face, hair, clothing, colors or background.`);
+    return out.join('\n');
   };
+
   function renderChips() {
     const el = $('#is_chips'); if (!el) return;
     const s = S(), names = slotRefs().map(r => r.name.trim()).filter(n => !isAuto(n));
@@ -169,33 +193,52 @@
         <textarea data-act="ref-neg" placeholder="Negative for this character">${esc(r.negative || '')}</textarea></details></div></div>`;
     }).join('') + (s.refSlots.length < MAX_REFS ? '<button class="is-btn full" style="margin-top:6px" data-act="slot-add">＋ Add character reference</button>' : '');
     $('#is_refcount').textContent = `${s.refSlots.length}/${MAX_REFS}`;
-    renderChips(); renderPreview();
+    renderChips(); renderPose(); renderPreview();
+  }
+  function renderPose() {
+    const el = $('#is_pose'); if (!el) return;
+    const s = S(); if (state.refsLoaded && s.poseId && !state.refs.some(r => r.id === s.poseId)) { s.poseId = ''; save(); }
+    const r = state.refs.find(x => x.id === s.poseId);
+    el.innerHTML = r ? `<div class="is-slotrow" data-rid="${r.id}">${thumbHtml(r, modeOf(r) === 'text' ? 'dim' : '')}<div class="is-slotf">
+        <div class="is-row"><input type="text" data-act="ref-name" value="${esc(r.name)}" placeholder="Pose name"><button class="is-ib" data-act="pose-rm" title="Remove pose">✕</button></div>
+        ${modeSelect(r)}<span class="is-tag">${modeOf(r) === 'text' ? 'text only' : 'POSE image'}</span>
+        <details class="is-slotd" ${r.description || r.negative ? 'open' : ''}><summary>Pose text &amp; negative</summary>
+        <textarea data-act="ref-desc" placeholder="The pose in words: sitting cross-legged, looking over shoulder, hand on cheek">${esc(r.description || '')}</textarea>
+        <textarea data-act="ref-neg" placeholder="Negative for this pose (e.g. crossed arms)">${esc(r.negative || '')}</textarea></details></div></div>`
+      : '<button class="is-btn full" data-act="pose-add">＋ Add pose reference</button>';
   }
   function renderRefs() {
     const el = $('#is_refs'); if (!el) return;
-    el.innerHTML = state.refs.length ? state.refs.map(r => `<div class="is-ref" data-id="${r.id}" data-rid="${r.id}">${thumbHtml(r)}
-      <div class="is-ref-f"><input type="text" data-act="ref-name" value="${esc(r.name)}" placeholder="Name used in prompts, e.g. personA">
+    const kind = state.refKind, pose = kind === 'pose';
+    $$('[data-act="ref-kind"]').forEach(b => b.classList.toggle('on', b.dataset.kind === kind));
+    const up = $('[data-act="ref-upload"]'), nw = $('[data-act="ref-text-new"]');
+    if (up) up.textContent = pose ? 'Upload pose images' : 'Upload images'; if (nw) nw.textContent = pose ? '＋ New text-only pose' : '＋ New text-only character';
+    const list = state.refs.filter(r => (r.kind || 'character') === kind);
+    el.innerHTML = list.length ? list.map(r => `<div class="is-ref" data-id="${r.id}" data-rid="${r.id}">${thumbHtml(r)}
+      <div class="is-ref-f"><input type="text" data-act="ref-name" value="${esc(r.name)}" placeholder="${pose ? 'Pose name' : 'Name used in prompts, e.g. personA'}">
       ${modeSelect(r)}
-      <textarea data-act="ref-desc" placeholder="Text prompt for this character (looks, outfit, tags…)">${esc(r.description || '')}</textarea>
-      <textarea data-act="ref-neg" placeholder="Negative for this character">${esc(r.negative || '')}</textarea>
-      <div class="is-row"><button class="is-btn full" data-act="ref-slot">Use in prompt</button><button class="is-btn" data-act="ref-del" title="Delete">🗑</button></div></div></div>`).join('')
-      : '<div class="is-empty">No references yet. Upload a character image, or add a text-only character.</div>';
+      <textarea data-act="ref-desc" placeholder="${pose ? 'The pose in words (sitting, looking back, hand on hip…)' : 'Text prompt for this character (looks, outfit, tags…)'}">${esc(r.description || '')}</textarea>
+      <textarea data-act="ref-neg" placeholder="${pose ? 'Negative for this pose' : 'Negative for this character'}">${esc(r.negative || '')}</textarea>
+      <div class="is-row"><button class="is-btn full" data-act="ref-slot">${pose ? 'Use as pose' : 'Use in prompt'}</button><button class="is-btn" data-act="ref-del" title="Delete">🗑</button></div></div></div>`).join('')
+      : `<div class="is-empty">${pose ? 'No poses yet. Upload a pose picture, or add a text-only pose.' : 'No references yet. Upload a character image, or add a text-only character.'}</div>`;
   }
-  function openPicker() {
-    const s = S(), free = state.refs.filter(r => !s.refSlots.includes(r.id));
-    $('#is_lb').innerHTML = `<div class="is-hint">Choose a reference (${s.refSlots.length}/${MAX_REFS} in use)</div>`
-      + (free.length ? `<div class="is-pickgrid">${free.map(r => `<div class="is-pickitem" data-pick="${r.id}">${thumbHtml(r)}<div>${esc(r.name)}</div></div>`).join('')}</div>` : '<div class="is-empty">No unused references. Upload a new one.</div>')
+  function openPicker(kind = 'character') {
+    const s = S(); state.pickKind = kind;
+    const free = state.refs.filter(r => (r.kind || 'character') === kind && (kind === 'pose' ? r.id !== s.poseId : !s.refSlots.includes(r.id)));
+    $('#is_lb').innerHTML = `<div class="is-hint">${kind === 'pose' ? 'Choose a pose reference' : `Choose a character reference (${s.refSlots.length}/${MAX_REFS} in use)`}</div>`
+      + (free.length ? `<div class="is-pickgrid">${free.map(r => `<div class="is-pickitem" data-pick="${r.id}">${thumbHtml(r)}<div>${esc(r.name)}</div></div>`).join('')}</div>` : `<div class="is-empty">${kind === 'pose' ? 'No saved poses yet. Upload one.' : 'No unused references. Upload a new one.'}</div>`)
       + '<div class="is-row"><button class="is-btn pri full" data-act="pick-upload">Upload new</button><button class="is-btn full" data-act="lb-close">Cancel</button></div>';
     $('#is_lb').classList.add('on');
   }
   async function handleFiles(inp) {
-    const files = [...inp.files]; inp.value = ''; let n = 0;
+    const files = [...inp.files]; inp.value = ''; let n = 0; const kind = state.toSlot ? state.pickKind : state.refKind;
     for (const f of files) {
       if (!f.type.startsWith('image/')) continue;
-      try { const rec = await addRef(await readFile(f), f.name.replace(/\.[^.]+$/, '').slice(0, 40)); n++; if (state.toSlot) slotAdd(rec.id); } catch (e) { toast('error', `Could not read ${f.name}`); }
+      try { const rec = await addRef(await readFile(f), f.name.replace(/\.[^.]+$/, '').slice(0, 40), kind); n++; if (state.toSlot) { if (kind === 'pose') { if (n === 1) setPose(rec.id); } else slotAdd(rec.id); } } catch (e) { toast('error', `Could not read ${f.name}`); }
     }
     state.toSlot = false; $('#is_lb').classList.remove('on'); renderRefs(); renderSlots(); if (n) toast('success', `Added ${n} reference(s).`);
   }
+  async function imageToPose(url) { const rec = await addRef(url, 'Pose from image', 'pose'); setPose(rec.id); renderRefs(); toast('success', 'Set as the pose reference.'); }
   async function imageToRef(url) { const rec = await addRef(url, 'Generated'); const ok = S().refSlots.length < MAX_REFS && slotAdd(rec.id); renderRefs(); toast('success', ok ? 'Added as reference (IMAGE slot).' : 'Added to references.'); }
 
   /* ---------- Prompt variables ---------- */
@@ -220,11 +263,11 @@
     if (!g.key) throw new Error('Add your Gemini / proxy API key in Setup.');
     const base = g.endpoint.trim().replace(/\/+$/, '').replace(/\/v1(beta)?(\/.*)?$/, '');
     let text = neg ? `${prompt}\n\nAvoid: ${neg}` : prompt;
-    const refs = S().useRefs && S().refSlots.length ? await buildRefs('base64', /2\.5/.test(g.model) ? 3 : MAX_REFS) : [];
+    const refs = wantsImages() ? await buildRefs('base64', /2\.5/.test(g.model) ? 3 : MAX_REFS + 1) : [];
     const rb = refBlock(refs); if (rb) text += '\n\n' + rb;
     const parts = [];
     refs.forEach((r, i) => { if (r.description) parts.push({ text: `IMAGE_${i + 1}: ${r.description}` }); parts.push({ inlineData: { mimeType: 'image/png', data: r.image } }); });
-    if (refs.length) parts.push({ text: REF_INSTR });
+    { const ri = refInstr(refs); if (ri) parts.push({ text: ri }); }
     parts.push({ text });
     const imageConfig = { aspectRatio: g.aspect };
     if (/pro|gemini-3/i.test(g.model) && g.size) imageConfig.imageSize = g.size;
@@ -270,7 +313,7 @@
     if (!base) return toast('warning', 'Main prompt is empty.');
     const imgs = list.filter(c => c.mode !== 'text');
     { const miss = imgs.map(c => c.name).filter(n => n && !mentioned(base, n)); if (miss.length) toast('info', `${miss.join(', ')} not in the prompt — the model may ignore ${miss.length > 1 ? 'those references' : 'that reference'}.`); }
-    if (s.engine === 'standalone' && s.api === 'novelai' && imgs.length) toast('info', 'NovelAI can’t take reference images; text references are still applied.');
+    if (s.engine === 'standalone' && s.api === 'novelai' && (imgs.length || poseNow()?.hasImg)) toast('info', 'NovelAI can’t take reference images; text references are still applied.');
     state.busy = true; state.abort = new AbortController(); renderResult();
     try {
       const sig = state.abort.signal;
@@ -289,7 +332,7 @@
     await libPut({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(), title: '',
       image: l.url, thumb: await makeThumb(l.url), template: s.prompt, negative: s.negative, vars,
-      resolved: l.prompt, resolvedNeg: l.neg, refIds: s.useRefs ? [...s.refSlots] : [], engine: s.engine, api: s.api, profile: s.profiles[s.engine] || '', modelRaw: rawModel(),
+      resolved: l.prompt, resolvedNeg: l.neg, refIds: s.useRefs ? [...s.refSlots] : [], poseId: s.usePose ? s.poseId : '', engine: s.engine, api: s.api, profile: s.profiles[s.engine] || '', modelRaw: rawModel(),
       model: modelLabel(),
     });
     l.saved = true; renderResult(); if (!quiet) toast('success', 'Saved to library.');
@@ -386,8 +429,8 @@
       if (errs.length) throw new Error(errs.join('; '));
       let text = neg && !provider.supportsNegativePrompt(st) ? `${prompt}\n\nAvoid: ${neg}` : prompt;
       let references = [];
-      if (s.useRefs && chars().some(c => c.mode !== 'text')) {
-        const max = Math.min(MAX_REFS, ext.prov.getActiveProviderMaxReferences?.(st) || 0);
+      if (wantsImages()) {
+        const max = Math.min(MAX_REFS + 1, ext.prov.getActiveProviderMaxReferences?.(st) || 0);
         if (max > 0 && provider.supportsReferences(st)) references = await buildRefs(provider.capabilities?.referencesFormat === 'dataUrl' ? 'dataUrl' : 'base64', max);
         else toast('info', 'This model does not accept reference images, so they were skipped.');
       }
@@ -460,10 +503,10 @@
     if (!['naistera', 'custom'].includes(c.apiType) && !c.model) throw new Error('Pick a model in Image Studio (or set one in the SLAY profile).');
     const text0 = neg ? `${prompt}\n\nAvoid: ${neg}` : prompt, style = slayStyleNow();
     const cap = c.apiType === 'naistera' ? (['grok', 'nano banana'].includes(slayNaisteraModel(c.model)) ? 5 : 0) : (c.apiType === 'custom' && c.customBodyFormat === 'images' ? 0 : 5);
-    const refs = s.useRefs && cap && chars().some(x => x.mode !== 'text') ? await buildRefs('base64', cap) : [];
-    if (s.useRefs && !cap && chars().some(x => x.mode !== 'text')) toast('info', 'This SLAY connection/model does not accept reference images, so they were skipped.');
-    const instr = refs.map((r, i) => r.description ? `Image ${i + 1} is ${r.description} — preserve this appearance exactly.` : `Image ${i + 1} is a character reference — preserve this appearance exactly.`);
-    const refHead = refs.length ? `${instr.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n` : '';
+    const refs = cap && wantsImages() ? await buildRefs('base64', cap) : [];
+    if (!cap && wantsImages()) toast('info', 'This SLAY connection/model does not accept reference images, so they were skipped.');
+    const instr = refs.map((r, i) => r.pose ? `Image ${i + 1} is a POSE reference — copy only its body pose, limb placement and camera angle; ignore its person, clothing and background.` : r.description ? `Image ${i + 1} is ${r.description} — preserve this appearance exactly.` : `Image ${i + 1} is a character reference — preserve this appearance exactly.`);
+    const refHead = refs.length ? `${instr.join('\n')}\n${refs.some(r => !r.pose) ? 'Generate the scene below. Keep all faces and outfits faithful to the character references.' : 'Generate the scene below, using the pose reference only for the pose.'}\n\n` : '';
     let ratio = s.aspectOverride || (st.aspectRatio && st.aspectRatio !== 'auto' ? st.aspectRatio : '1:1'); if (!slayAspects.includes(ratio)) ratio = '1:1';
     let size = ['1K', '2K', '4K'].includes(st.imageSize) ? st.imageSize : '1K';
     let r, out;
@@ -478,7 +521,7 @@
     if (c.apiType === 'naistera') {
       const model = slayNaisteraModel(c.model), base = String(c.endpoint || 'https://naistera.org').trim().replace(/\/+$/, '').replace(/\/api\/generate$/i, '');
       const ratioN = s.aspectOverride || (st.naisteraAspectRatio && st.naisteraAspectRatio !== 'auto' ? st.naisteraAspectRatio : '1:1');
-      const lead = refs.length ? `[Reference images attached, in order: ${refs.map((x, i) => `${i + 1}=${x.description || 'reference'}`).join(', ')}. Use each reference for ITS OWN named subject only — do not mix attributes between subjects.] ` : '';
+      const lead = refs.length ? `[Reference images attached, in order: ${refs.map((x, i) => `${i + 1}=${x.pose ? 'POSE reference (copy the pose only)' : (x.description || 'reference')}`).join(', ')}. Use each reference for ITS OWN named subject only — do not mix attributes between subjects.] ` : '';
       const body = { prompt: lead + injectStyle(text0, style), aspect_ratio: ratioN, model }; if (refs.length) body.reference_images = refs.map(x => `data:image/png;base64,${x.image}`);
       r = await xfetch(`${base}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, signal, body: JSON.stringify(body) });
       if (!r.ok) throw new Error(`API Error (${r.status}): ${(await r.text()).slice(0, 300)}`);
@@ -666,6 +709,7 @@
       <div class="is-row"><button class="is-btn full" data-act="save" ${l.saved ? 'disabled' : ''}>${l.saved ? 'Saved' : 'Save to library'}</button>
       <button class="is-btn full" data-act="dl-last">Download</button></div>
       <div class="is-row" style="margin-top:6px"><button class="is-btn full" data-act="view-last">⛶ View full size</button><button class="is-btn full" data-act="res-ref">Use as reference</button></div>
+      <div class="is-row" style="margin-top:6px"><button class="is-btn full" data-act="res-pose">Use as pose</button></div>
       <details class="is-sent"><summary>Prompt that was sent</summary><pre>${esc(l.sent || '')}</pre></details>` : '';
   }
 
@@ -686,7 +730,8 @@
       <details class="is-sent"><summary>Prompt that was sent</summary><pre>${esc(it.resolved || '')}</pre></details>
       <div class="is-row"><button class="is-btn pri full" data-act="lb-save">Save changes</button><button class="is-btn full" data-act="lb-use">Use this prompt</button></div>
       <div class="is-row">${it.image ? '<button class="is-btn full" data-act="lb-view">⛶ Full size</button><button class="is-btn full" data-act="lb-dl">Download</button>' : ''}</div>
-      <div class="is-row">${it.image ? '<button class="is-btn full" data-act="lb-ref">Use as reference</button>' : ''}<button class="is-btn full" data-act="lb-export">Export</button></div>
+      <div class="is-row">${it.image ? '<button class="is-btn full" data-act="lb-ref">Use as reference</button><button class="is-btn full" data-act="lb-pose">Use as pose</button>' : ''}</div>
+      <div class="is-row"><button class="is-btn full" data-act="lb-export">Export</button></div>
       <div class="is-row"><button class="is-btn full" data-act="lb-del">Delete</button><button class="is-btn full" data-act="lb-close">Close</button></div>`;
     $('#is_lb').classList.add('on');
   }
@@ -694,8 +739,8 @@
     if (!state.refsLoaded) await loadRefs();
     const items = (await libAll()).filter(i => !ids || ids.includes(i.id));
     if (!items.length) return toast('info', 'Nothing to export.');
-    const want = new Set(items.flatMap(i => i.refIds || []));
-    const refs = state.refs.filter(r => want.has(r.id)).map(r => ({ id: r.id, name: r.name, description: r.description || '', negative: r.negative || '', mode: r.mode || 'both', ...(withImages && r.image ? { image: r.image, thumb: r.thumb } : {}) }));
+    const want = new Set(items.flatMap(i => [...(i.refIds || []), ...(i.poseId ? [i.poseId] : [])]));
+    const refs = state.refs.filter(r => want.has(r.id)).map(r => ({ id: r.id, kind: r.kind || 'character', name: r.name, description: r.description || '', negative: r.negative || '', mode: r.mode || 'both', ...(withImages && r.image ? { image: r.image, thumb: r.thumb } : {}) }));
     const data = { app: 'image-studio', format: 1, exported: new Date().toISOString(), includesImages: !!withImages, items: items.map(i => { const o = { ...i }; if (!withImages) { delete o.image; delete o.thumb; } return o; }), refs };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
     download(url, `image-studio-${withImages ? 'with-images' : 'prompts'}-${new Date().toISOString().slice(0, 10)}.json`);
@@ -718,7 +763,7 @@
     let addedRefs = 0;
     for (const r of data?.refs || []) {
       if (!r?.id || state.refs.some(x => x.id === r.id)) continue;
-      const rec = { id: r.id, ts: Date.now(), name: r.name || 'Reference', description: r.description || '', negative: r.negative || '', mode: r.mode || 'both', image: r.image || '', thumb: r.thumb || (r.image ? await makeThumb(r.image, 200) : '') };
+      const rec = { id: r.id, ts: Date.now(), kind: r.kind === 'pose' ? 'pose' : 'character', name: r.name || 'Reference', description: r.description || '', negative: r.negative || '', mode: r.mode || 'both', image: r.image || '', thumb: r.thumb || (r.image ? await makeThumb(r.image, 200) : '') };
       await putRef(rec); state.refs.unshift(rec); addedRefs++;
     }
     renderLibrary(); renderRefs(); renderSlots();
@@ -800,6 +845,9 @@
           <div id="is_slots"></div>
           <div id="is_chips" class="is-chips"></div>
           <div class="is-hint">Name each character and use the names in your prompt: “personA kissing personB”. Each can be sent as <b>image + text</b>, <b>image only</b> or <b>text only</b>. Text prompts go in the way the model likes: NovelAI V4 gets real per-character prompts, other models get the description next to the name plus a “Characters” list. Check “Final prompt preview” to see it.</div>
+          <div class="is-row" style="justify-content:space-between;margin-top:14px"><span class="is-l" style="margin:0">Pose reference</span><label class="is-l" style="margin:0"><input type="checkbox" data-k="usePose"> Send</label></div>
+          <div id="is_pose"></div>
+          <div class="is-hint">A picture of the pose (photo, stick figure, mannequin, openpose) and/or the pose in words. The picture is used for the pose only, not for who is in it. NovelAI uses the text only.</div>
           <details style="margin-top:10px"><summary class="is-hint" style="cursor:pointer">Final prompt preview</summary><pre id="is_prev" style="white-space:pre-wrap;font-size:12px"></pre></details>
           <button id="is_gen" class="is-btn pri full" style="margin-top:12px" data-act="gen">Generate</button>
           <div id="is_result" class="is-result"></div>
@@ -812,7 +860,8 @@
           <div id="is_lib" class="is-lib"></div>
         </section>
         <section class="is-sec" data-tab="refs">
-          <div class="is-hint">Saved characters and subjects. Pick up to 4 per image from the Create tab.</div>
+          <div class="is-row" style="margin-bottom:8px"><button class="is-btn full" data-act="ref-kind" data-kind="character">Characters</button><button class="is-btn full" data-act="ref-kind" data-kind="pose">Poses</button></div>
+          <div class="is-hint">Characters: up to 4 per image, chosen on the Create tab. Poses: one pose reference per image.</div>
           <button class="is-btn pri full" data-act="ref-upload">Upload images</button>
           <button class="is-btn full" style="margin-top:6px" data-act="ref-text-new">＋ New text-only character</button>
           <div id="is_refs" style="margin-top:8px"></div>
@@ -866,7 +915,7 @@
 
     p.addEventListener('click', async (e) => {
       const tab = e.target.closest('.is-tab'); if (tab) { const s = S(); s.tab = tab.dataset.tab; save(); applyUI(); if (s.tab === 'library') renderLibrary(); if (s.tab === 'refs') renderRefs(); if (s.tab === 'setup') renderImport(); return; }
-      const pk = e.target.closest('[data-pick]'); if (pk) { slotAdd(pk.dataset.pick); $('#is_lb').classList.remove('on'); return; }
+      const pk = e.target.closest('[data-pick]'); if (pk) { if (state.pickKind === 'pose') setPose(pk.dataset.pick); else slotAdd(pk.dataset.pick); $('#is_lb').classList.remove('on'); return; }
       const card = e.target.closest('.is-card'); if (card) return openLightbox(card.dataset.id);
       const b = e.target.closest('[data-act]'); if (!b || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
       const s = S(), vi = b.closest('.is-var')?.dataset.i, v = vi !== undefined ? s.vars[vi] : null;
@@ -891,10 +940,15 @@
           list.forEach(x => { if (!sv.options.some(o => o.value === x.value)) sv.options.push({ name: String(x.name || x.title || x.value).slice(0, 40), value: x.value }); });
           save(); renderVars(); return toast('success', `Imported ${list.length} style(s) into {style}.`);
         }
-        case 'slot-add': return openPicker();
+        case 'slot-add': return openPicker('character');
+        case 'pose-add': return openPicker('pose');
+        case 'pose-rm': s.poseId = ''; save(); renderPose(); return renderPreview();
+        case 'ref-kind': state.refKind = b.dataset.kind; return renderRefs();
+        case 'res-pose': return imageToPose(state.last.url);
+        case 'lb-pose': { const it = (await libAll()).find(x => x.id === state.lbId); if (it) { await imageToPose(it.image); $('#is_lb').classList.remove('on'); } return; }
         case 'slay-style': return openSlayStyle();
         case 'slay-style-clear': s.slayStyle = ''; s.slayStyleName = ''; save(); return renderSlayStyle();
-        case 'ref-text-new': { await addTextRef(); renderRefs(); return toast('success', 'Text-only character added. Give it a name and prompt.'); }
+        case 'ref-text-new': { await addTextRef(state.refKind); renderRefs(); return toast('success', state.refKind === 'pose' ? 'Text-only pose added. Name it and describe the pose.' : 'Text-only character added. Give it a name and prompt.'); }
         case 'reset-pos': s.fabPos = null; s.panelPos = null; save(); placeFab(); placePanel(); return toast('success', 'Positions reset.');
         case 'chip': {
           const ta = $('[data-k="prompt"]'), a = ta.selectionStart ?? ta.value.length, e2 = ta.selectionEnd ?? a;
@@ -905,7 +959,7 @@
         case 'slot-rm': { s.refSlots.splice(+b.closest('.is-slotrow').dataset.i, 1); save(); return renderSlots(); }
         case 'pick-upload': state.toSlot = true; return $('#is_file').click();
         case 'ref-upload': state.toSlot = false; return $('#is_file').click();
-        case 'ref-slot': { if (slotAdd(b.closest('.is-ref').dataset.id)) toast('success', 'Added to this generation.'); return; }
+        case 'ref-slot': { const id = b.closest('.is-ref').dataset.id, rr = state.refs.find(x => x.id === id); if (rr?.kind === 'pose') { setPose(id); toast('success', 'Set as the pose reference.'); } else if (slotAdd(id)) toast('success', 'Added to this generation.'); return; }
         case 'ref-del': { const id = b.closest('.is-ref').dataset.id; if (confirm('Delete this reference?')) { await dbDo('readwrite', st => st.delete(id), REFS); state.refs = state.refs.filter(r => r.id !== id); s.refSlots = s.refSlots.filter(x => x !== id); save(); renderRefs(); renderSlots(); } return; }
         case 'res-ref': return imageToRef(state.last.url);
         case 'lb-ref': { const it = (await libAll()).find(x => x.id === state.lbId); if (it) { await imageToRef(it.image); $('#is_lb').classList.remove('on'); } return; }
@@ -927,6 +981,8 @@
           if (!state.refsLoaded) await loadRefs();
           s.refSlots = (it.refIds || []).filter(id => state.refs.some(r => r.id === id)).slice(0, MAX_REFS);
           if ((it.refIds || []).length > s.refSlots.length) toast('info', 'Some saved references no longer exist.');
+          if (it.poseId && !state.refs.some(r => r.id === it.poseId)) toast('info', 'The saved pose no longer exists.');
+          s.poseId = state.refs.some(r => r.id === it.poseId) ? it.poseId : '';
           save(); $('#is_lb').classList.remove('on'); s.tab = 'create'; applyUI(); renderVars(); renderSlots(); renderConn(); return;
         }
       }
