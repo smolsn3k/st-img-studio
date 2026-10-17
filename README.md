@@ -147,7 +147,10 @@ Both are stored in your **browser's storage** (IndexedDB), so they are per devic
 
 ## Troubleshooting
 
-- **Wand or Extensions entry missing:** wait a few seconds after SillyTavern loads (they are added once its menus exist). The floating button always works.
+- **It won't open (phone or desktop):** if Image Studio fails to load or the panel can't be seen, a red **⚠** button appears at the bottom-left. Tap it to see the reason, then **Copy** and send that text to whoever maintains the extension. The same report is under **Setup → Run self-check**.
+- **Other ways to open it:** the floating 🎨 button, the wand (✨) menu, **Extensions → Image Studio**, the slash command `/imagestudio`, or add `?imagestudio` to the end of SillyTavern's address (for example `http://localhost:8000/?imagestudio`), which also brings back a hidden floating button.
+- **Panel opens but you can't see it:** Image Studio checks this itself and moves the panel in front of anything covering it. If that fails, the ⚠ report names what is covering it.
+- **Wand or Extensions entry missing:** they are added once SillyTavern builds those menus, which can take a few seconds on a phone. The floating button always works.
 - **A red "⚠ …" line under the tabs** means one part of the panel failed to load; the rest still works. Send that text when reporting a problem.
 - **Extension "(not found)":** use **Re-scan extensions and profiles** on the Setup tab. Image Studio finds sillyimages and SLAY Images through SillyTavern's installed-extensions list.
 - **NovelAI errors:** check that your NovelAI key is saved under API Connections.

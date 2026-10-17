@@ -1,11 +1,11 @@
 /* Image Studio – inherits SillyTavern theme variables, works on PC + mobile */
-#is_fab{position:fixed;right:14px;bottom:96px;z-index:4999;width:46px;height:46px;border-radius:50%;
+#is_fab{position:fixed;right:14px;bottom:96px;z-index:89999;width:46px;height:46px;border-radius:50%;
   display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;user-select:none;
   background:var(--SmartThemeBlurTintColor,#23232b);color:var(--SmartThemeBodyColor,#ddd);
   border:1px solid var(--SmartThemeBorderColor,#555);box-shadow:0 2px 10px rgba(0,0,0,.45);touch-action:none}
 #is_fab.is-off{display:none}
 
-#is_panel{--is-op:.92;position:fixed;z-index:5000;right:14px;bottom:14px;width:min(440px,calc(100vw - 28px));
+#is_panel{--is-op:.92;position:fixed;z-index:90000;right:14px;bottom:14px;width:min(440px,calc(100vw - 28px));
   max-height:calc(100vh - 28px);max-height:calc(100dvh - 28px);display:flex;flex-direction:column;overflow:hidden;
   color:var(--SmartThemeBodyColor,#ddd);font-size:14px;line-height:1.35;
   border:1px solid var(--SmartThemeBorderColor,#555);border-radius:14px;
@@ -125,7 +125,7 @@
 .is-opt{border:1px solid var(--SmartThemeBorderColor,#555);border-radius:8px;padding:6px;margin-top:6px}
 .is-opt textarea{min-height:56px!important;margin:6px 0}
 .is-bigph{aspect-ratio:3/4;width:100%;height:auto;border-radius:0;font-size:28px}
-.is-viewer{position:fixed;top:0;left:0;right:0;bottom:0;z-index:5600;background:rgba(0,0,0,.94);flex-direction:column}
+.is-viewer{position:fixed;top:0;left:0;right:0;bottom:0;z-index:90100;background:rgba(0,0,0,.94);flex-direction:column}
 .is-viewer-scroll{position:absolute;top:0;left:0;right:0;bottom:0;overflow:auto;display:flex;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y pinch-zoom}
 .is-viewer-scroll img{margin:auto;max-width:100%;max-height:100%;object-fit:contain;cursor:zoom-in}
 .is-viewer.zoom .is-viewer-scroll img{max-width:none;max-height:none;cursor:zoom-out}
