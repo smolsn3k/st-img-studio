@@ -133,3 +133,7 @@
 .is-viewer-bar .is-ib{width:44px;height:44px;font-size:18px;background:rgba(0,0,0,.65);color:#fff;border-color:rgba(255,255,255,.35)}
 
 .is-btn.on{background:var(--SmartThemeQuoteColor,#3b6fd4);color:#fff;border-color:transparent;font-weight:600}
+
+/* docked inside the Extensions drawer */
+#is_panel.is-docked{position:relative!important;left:auto!important;right:auto!important;top:auto!important;bottom:auto!important;width:100%!important;max-height:none!important;height:auto!important;z-index:auto!important;margin-top:10px;border-radius:12px;box-shadow:none}
+#is_panel.is-docked .is-body{overflow:visible}
