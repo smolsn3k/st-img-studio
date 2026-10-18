@@ -30,7 +30,7 @@ Install it from SillyTavern, no manual copying needed:
 
 4. Choose whether to install it **for all users** or **just for you**, then reload the page when asked.
 
-Open the panel with the floating 🎨 button, the wand (✨) menu → **Image Studio**, or **Extensions → Image Studio → Open Image Studio** (or **Open here, inside this menu**). The wand and Extensions entries are added as soon as SillyTavern builds those menus, even if that is late on a slow phone.
+Open the panel with the floating 🎨 button, the wand (✨) menu → **Image Studio**, or **Extensions → Image Studio → Open Image Studio**. The wand and Extensions entries are added as soon as SillyTavern builds those menus, even if that is late on a slow phone.
 
 **Updating:** open **Extensions → Manage extensions** and use the update button next to Image Studio (or the update-all button), then reload.
 
@@ -147,12 +147,11 @@ Both are stored in your **browser's storage** (IndexedDB), so they are per devic
 
 ## Troubleshooting
 
-- **It won't open (phone or desktop):** open **Extensions → Image Studio**. The title shows the installed version (so you can tell the update applied) and there are two buttons:
-  - **Open Image Studio** opens the floating window. A small "opening…" message appears when your tap is received, and a status line under the buttons says whether it worked.
-  - **Open here, inside this menu** shows Image Studio inside the Extensions menu itself, which can never be covered by anything else. If the floating window can't be shown, Image Studio switches to this automatically.
+- **It won't open (phone or desktop):** open **Extensions → Image Studio**. The title shows the installed version (so you can tell the update applied). **Open Image Studio** opens the popup; a small "opening…" message appears when your tap is received, and a status line under the button says whether it worked.
+- **Image Studio is a separate popup.** It is drawn in the browser's top layer, so it appears above SillyTavern's menus and drawers instead of behind them, and if something else is shown over it, it raises itself back on top. SillyTavern's own notifications can't show above it, so while it is open they appear inside the popup.
 - **Red ⚠ button (bottom-left):** if Image Studio fails to load or hits an error it can't recover from, this appears. Tap it to see the reason, then **Copy** and send that text to whoever maintains the extension. The same report is under **Setup → Run self-check**.
 - **Other ways to open it:** the floating 🎨 button, the wand (✨) menu, the slash command `/imagestudio`, or add `?imagestudio` to the end of SillyTavern's address (for example `http://localhost:8000/?imagestudio`), which also brings back a hidden floating button.
-- **Panel opens but you can't see it:** Image Studio checks this itself and moves the panel in front of anything covering it, or opens it inside the Extensions menu.
+- **Popup opens but you can't see it:** Image Studio checks this itself and raises it above whatever is covering it. Only if that is impossible on your device does it fall back to showing inside the Extensions menu, and the status line says so. (Needs a browser with the Popover API: Chrome/Edge 114+, Safari 17+, Firefox 125+. Older browsers use a normal floating window.)
 - **Wand or Extensions entry missing:** they are added once SillyTavern builds those menus, which can take a few seconds on a phone. The floating button always works.
 - **A red "⚠ …" line under the tabs** means one part of the panel failed to load; the rest still works. Send that text when reporting a problem.
 - **Extension "(not found)":** use **Re-scan extensions and profiles** on the Setup tab. Image Studio finds sillyimages and SLAY Images through SillyTavern's installed-extensions list.

@@ -95,14 +95,26 @@ try {
  */
 (() => {
   const MODULE = 'image_studio';
-  const VERSION = '2.1.0';
+  const VERSION = '2.2.0';
   const ctx = () => SillyTavern.getContext();
   const clone = o => (o === undefined ? undefined : JSON.parse(JSON.stringify(o))); // structuredClone isn't available on older phones
   const report = (where, e, critical) => { try { window.__imageStudioReport && window.__imageStudioReport(where, e, critical); } catch (x) { /* ignore */ } };
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (t) => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const toast = (type, msg) => { try { window.toastr?.[type](msg, 'Image Studio'); } catch { console.log(msg); } };
+  const toast = (type, msg) => { try { window.toastr?.[type](msg, 'Image Studio'); } catch { console.log(msg); } inlineToast(type, msg); };
+  // Top layer: a popover="manual" element is drawn above everything on the page whatever its z-index, and doesn't block the page behind it.
+  const hasPopover = () => typeof HTMLElement !== 'undefined' && typeof HTMLElement.prototype.showPopover === 'function';
+  const inTop = el => { try { return !!el && el.matches(':popover-open'); } catch (x) { return false; } };
+  function topShow(el) { if (!el || !hasPopover()) return; try { if (inTop(el)) el.hidePopover(); el.showPopover(); } catch (x) { /* unsupported or not connected */ } } // re-showing also moves it above anything shown since
+  function topHide(el) { try { if (el && inTop(el)) el.hidePopover(); } catch (x) { /* ignore */ } }
+  // SillyTavern's toasts are drawn below the top layer, so while the popup is open they are mirrored inside it.
+  function inlineToast(type, msg) {
+    const p = document.getElementById('is_panel'), el = document.getElementById('is_inline_toast');
+    if (!p || !el || !inTop(p)) return;
+    el.textContent = String(msg); el.className = 'is-itoast ' + type; el.style.display = '';
+    clearTimeout(el._t); el._t = setTimeout(() => { el.style.display = 'none'; }, 3500);
+  }
 
   const DEFAULTS = {
     engine: 'sillyimages', api: 'gemini', fabPos: null, panelPos: null, extPaths: {}, slayStyle: '', slayStyleName: '', slayShare: false, profiles: {}, models: {}, aspectOverride: '', refSlots: [], useRefs: true, poseId: '', usePose: true,
@@ -668,6 +680,8 @@ try {
     const st = ext.getSettings(), s = S(), prev = { style: st.slayStyle, name: st.slayStyleName };
     if (!s.slayShare) { st.slayStyle = s.slayStyle; st.slayStyleName = s.slayStyleName; } // so the picker highlights the Studio's current style
     const restore = () => { if (s.slayShare) return; st.slayStyle = prev.style; st.slayStyleName = prev.name; const el = document.getElementById('slay_style_name'); if (el) el.textContent = prev.name || 'Не заменять'; ctx().saveSettingsDebounced(); };
+    const pp = $('#is_panel'), wasTop = inTop(pp); topHide(pp); // the style picker is an ordinary page layer; it would be hidden behind our popup
+    const back = () => { if (wasTop && pp && !pp.classList.contains('is-hidden') && !isDocked()) topShow(pp); };
     btn.click();
     let seen = false, n = 0;
     const iv = setInterval(() => {
@@ -675,7 +689,7 @@ try {
       if ((seen && !open) || ++n > 1200) {
         clearInterval(iv);
         if (seen) { s.slayStyle = st.slayStyle || ''; s.slayStyleName = st.slayStyle ? (st.slayStyleName || '') : ''; save(); }
-        restore(); renderSlayStyle();
+        restore(); renderSlayStyle(); back();
       }
     }, 250);
   }
@@ -907,8 +921,8 @@ try {
     if ($('#is_panel')) return;
     document.body.insertAdjacentHTML('beforeend', `
     <div id="is_fab" title="Image Studio">🎨</div>
-    <div id="is_viewer" class="is-viewer" style="display:none"><div class="is-viewer-bar"><button class="is-ib" data-vact="dl" title="Download">⬇</button><button class="is-ib" data-vact="close" title="Close">✕</button></div><div class="is-viewer-scroll"><img id="is_viewer_img" alt="Generated image"></div></div>
-    <div id="is_panel" class="is-hidden">
+    <div id="is_viewer" class="is-viewer" popover="manual" style="display:none"><div class="is-viewer-bar"><button class="is-ib" data-vact="dl" title="Download">⬇</button><button class="is-ib" data-vact="close" title="Close">✕</button></div><div class="is-viewer-scroll"><img id="is_viewer_img" alt="Generated image"></div></div>
+    <div id="is_panel" class="is-hidden" popover="manual">
       <div class="is-head">
         <span class="is-title">Image Studio</span>
         <div class="is-op-wrap" title="Panel opacity"><span>◐</span><input type="range" id="is_op" min="25" max="100"></div>
@@ -996,6 +1010,7 @@ try {
         </section>
       </div>
       <div id="is_lb" class="is-lb"></div>
+      <div id="is_inline_toast" class="is-itoast" style="display:none"></div>
     </div>`);
     const p = $('#is_panel');
     $('#is_viewer').addEventListener('click', (e) => {
@@ -1006,7 +1021,7 @@ try {
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#is_viewer')?.style.display !== 'none') closeViewer(); });
 
     $('#is_fab').addEventListener('click', e => { const f = e.currentTarget; if (f._dragged || Date.now() - (f._tapAt || 0) < 700) return; toggle(); });
-    $('#is_close').addEventListener('click', () => { p.classList.add('is-hidden'); undockPanel(); });
+    $('#is_close').addEventListener('click', () => { p.classList.add('is-hidden'); topHide(p); undockPanel(); });
     $('#is_min').addEventListener('click', () => { const s = S(); s.minimized = !s.minimized; save(); applyUI(); });
     $('#is_op').addEventListener('input', e => { const s = S(); s.opacity = e.target.value / 100; p.style.setProperty('--is-op', s.opacity); save(); });
     $('#is_search').addEventListener('input', e => { state.libFilter = e.target.value.toLowerCase(); renderLibrary(); });
@@ -1134,9 +1149,9 @@ try {
   /* ---------- full-size image viewer ---------- */
   function openViewer(url) {
     const v = $('#is_viewer'); if (!v || !url) return;
-    v.classList.remove('zoom'); $('#is_viewer_img').src = url; v._url = url; v.style.display = 'flex';
+    v.classList.remove('zoom'); $('#is_viewer_img').src = url; v._url = url; v.style.display = 'flex'; topShow(v);
   }
-  function closeViewer() { const v = $('#is_viewer'); if (v) { v.style.display = 'none'; $('#is_viewer_img').removeAttribute('src'); } }
+  function closeViewer() { const v = $('#is_viewer'); if (v) { topHide(v); v.style.display = 'none'; $('#is_viewer_img').removeAttribute('src'); } }
 
   /* ---------- dragging (floating button + desktop window) ---------- */
   function dragify(el, handle, { skip, enabled, move, end, tap }) {
@@ -1197,7 +1212,8 @@ try {
     const p = $('#is_panel');
     if (p.classList.contains('is-docked')) { undockPanel(); p.classList.add('is-hidden'); } // so the toggle below opens it as the floating window
     p.classList.toggle('is-hidden');
-    if (p.classList.contains('is-hidden')) return;
+    if (p.classList.contains('is-hidden')) { topHide(p); return; }
+    topShow(p);
     const er = $('#is_err'); if (er) er.style.display = 'none';
     // each step is isolated so one failure can't leave the other fields empty
     for (const [n, f] of [['layout', placePanel], ['settings', applyUI], ['variables', renderVars], ['result', renderResult], ['references', renderSlots], ['connection', renderConn]]) guard(n, f);
@@ -1207,7 +1223,8 @@ try {
   const describeEl = el => (el ? `<${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : ''}>` : 'nothing');
   function bringToFront() {
     for (const id of ['is_fab', 'is_panel', 'is_viewer']) { const el = document.getElementById(id); if (el) document.body.appendChild(el); }
-    const p = $('#is_panel'); if (p) p.style.zIndex = '2147483000';
+    const p = $('#is_panel'); if (p) { p.style.zIndex = '2147483000'; if (!p.classList.contains('is-hidden') && !isDocked()) topShow(p); }
+    const v = $('#is_viewer'); if (v && v.style.display !== 'none') topShow(v); // re-adding to the page closed them: show again, viewer last so it stays on top
   }
   function verifyOpen() {
     const p = $('#is_panel'); if (!p || p.classList.contains('is-hidden') || !document.elementFromPoint || isDocked()) return;
@@ -1218,16 +1235,16 @@ try {
     };
     let why = check(); if (why) { bringToFront(); why = check(); }
     if (!why) { setDrawerStatus('Opened ✓'); return; }
-    if (dockPanel()) { setDrawerStatus('The floating window could not be shown, so Image Studio opened inside this menu instead.'); report('open', new Error(`Floating panel not visible (${why}); opened inside the Extensions menu.`), false); return; }
+    if (dockPanel()) { setDrawerStatus('The popup could not be shown on this device, so Image Studio opened here as a last resort.'); report('open', new Error(`Floating panel not visible (${why}); opened inside the Extensions menu.`), false); return; }
     setDrawerStatus('Could not open: ' + why);
     report('open', new Error('The panel opened but is not visible: ' + why), true);
   }
   function diagText() {
     const L = [`Image Studio v${VERSION}`, `UA: ${navigator.userAgent}`, `Screen: ${innerWidth}x${innerHeight} @${window.devicePixelRatio || 1}`];
     const feat = (n, f) => { let ok = false; try { ok = !!f(); } catch (x) { /* no */ } return `${n}: ${ok ? 'yes' : 'NO'}`; };
-    L.push(feat('regex lookbehind', () => new RegExp('(?<!a)b').test('cb')), feat('structuredClone', () => typeof structuredClone === 'function'), feat('PointerEvent', () => window.PointerEvent), feat('IndexedDB', () => window.indexedDB), feat('MutationObserver', () => window.MutationObserver), feat('dvh units', () => CSS.supports('height', '1dvh')), feat('color-mix', () => CSS.supports('color', 'color-mix(in srgb, red, blue)')));
+    L.push(feat('regex lookbehind', () => new RegExp('(?<!a)b').test('cb')), feat('structuredClone', () => typeof structuredClone === 'function'), feat('PointerEvent', () => window.PointerEvent), feat('IndexedDB', () => window.indexedDB), feat('MutationObserver', () => window.MutationObserver), feat('popover / top layer', () => hasPopover()), feat('dvh units', () => CSS.supports('height', '1dvh')), feat('color-mix', () => CSS.supports('color', 'color-mix(in srgb, red, blue)')));
     for (const id of ['is_fab', 'is_panel', 'is_menu_item', 'is_open_btn', 'extensionsMenu', 'extensions_settings2']) L.push(`#${id}: ${document.getElementById(id) ? 'present' : 'missing'}`);
-    const p = $('#is_panel'); if (p) { const cs = getComputedStyle(p), r = p.getBoundingClientRect(); L.push(`panel: display=${cs.display} z=${cs.zIndex} rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} hidden=${p.classList.contains('is-hidden')}`); }
+    const p = $('#is_panel'); if (p) { const cs = getComputedStyle(p), r = p.getBoundingClientRect(); L.push(`panel: display=${cs.display} z=${cs.zIndex} rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} hidden=${p.classList.contains('is-hidden')} topLayer=${inTop(p)}`); }
     try { const sx = ctx().extensionSettings; L.push(`extensionSettings: ${sx ? 'ok' : 'MISSING'}`, `settings: engine=${sx && sx[MODULE] && sx[MODULE].engine} showButton=${sx && sx[MODULE] && sx[MODULE].showButton}`); } catch (x) { L.push('SillyTavern context: ' + x.message); }
     const errs = window.__imageStudioErrors || []; if (errs.length) L.push('Errors:', ...errs.slice(-6));
     return L.join('\n');
@@ -1238,20 +1255,19 @@ try {
   const setDrawerStatus = txt => { const el = $('#is_drawer_status'); if (el) el.textContent = txt; };
   const isDocked = () => !!$('#is_panel')?.classList.contains('is-docked');
   // "Docked" = the panel is shown inside the Extensions drawer instead of floating. The drawer is always visible, so this can't be covered.
-  function undockPanel() { const p = $('#is_panel'); if (!p || !p.classList.contains('is-docked')) return; p.classList.remove('is-docked'); document.body.appendChild(p); placePanel(); }
+  function undockPanel() { const p = $('#is_panel'); if (!p || !p.classList.contains('is-docked')) return; topHide(p); p.classList.remove('is-docked'); document.body.appendChild(p); placePanel(); }
   function dockPanel() {
     const p = $('#is_panel'), host = $('#is_settings .inline-drawer-content'); if (!p || !host) return false;
-    p.classList.add('is-docked'); p.classList.remove('is-hidden', 'is-min'); host.appendChild(p);
+    topHide(p); p.classList.add('is-docked'); p.classList.remove('is-hidden', 'is-min'); host.appendChild(p);
     Object.assign(p.style, { left: '', top: '', right: '', bottom: '', maxHeight: '', zIndex: '' });
     for (const [n, f] of [['settings', applyUI], ['variables', renderVars], ['result', renderResult], ['references', renderSlots], ['connection', renderConn]]) guard(n, f);
     try { p.scrollIntoView({ block: 'nearest' }); } catch (x) { /* ignore */ }
     return true;
   }
-  function showPanel(dock) {
+  function showPanel() {
     const now = Date.now(); if (now - lastOpen < 500) return; lastOpen = now;
     const p = $('#is_panel'); if (!p) return;
     toast('info', `Image Studio ${VERSION}: opening…`); // proves the tap reached us
-    if (dock && dockPanel()) { setDrawerStatus('Opened inside this menu ✓'); return; }
     if (isDocked()) undockPanel();
     if (p.classList.contains('is-hidden')) toggle();
     else { const s = S(); if (s.minimized) { s.minimized = false; save(); applyUI(); } bringToFront(); setTimeout(verifyOpen, 200); }
@@ -1262,15 +1278,15 @@ try {
     const menu = $('#extensionsMenu');
     if (menu && !$('#is_menu_item')) menu.insertAdjacentHTML('beforeend', '<div id="is_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" role="button" style="cursor:pointer"><div class="fa-solid fa-palette extensionsMenuExtensionButton"></div><span>Image Studio</span></div>');
     const host = $('#extensions_settings2') || $('#extensions_settings');
-    if (host && !$('#is_settings')) host.insertAdjacentHTML('beforeend', `<div id="is_settings" class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Image Studio <small style="opacity:.6">v${VERSION}</small></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><label class="checkbox_label"><input type="checkbox" id="is_show_btn"><span>Show floating button</span></label><div class="menu_button" id="is_open_btn" style="cursor:pointer">Open Image Studio</div><div class="menu_button" id="is_dock_btn" style="cursor:pointer">Open here, inside this menu</div><div id="is_drawer_status" class="is-hint" style="margin:6px 4px"></div></div></div>`);
-    for (const id of ['is_menu_item', 'is_open_btn', 'is_dock_btn']) { const el = document.getElementById(id); if (el && !el.dataset.direct) { el.dataset.direct = 1; el.addEventListener('click', () => showPanel(id === 'is_dock_btn')); } } // direct handler too; showPanel ignores the duplicate
+    if (host && !$('#is_settings')) host.insertAdjacentHTML('beforeend', `<div id="is_settings" class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Image Studio <small style="opacity:.6">v${VERSION}</small></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><label class="checkbox_label"><input type="checkbox" id="is_show_btn"><span>Show floating button</span></label><div class="menu_button" id="is_open_btn" style="cursor:pointer">Open Image Studio</div><div id="is_drawer_status" class="is-hint" style="margin:6px 4px"></div></div></div>`);
+    for (const id of ['is_menu_item', 'is_open_btn']) { const el = document.getElementById(id); if (el && !el.dataset.direct) { el.dataset.direct = 1; el.addEventListener('click', () => showPanel()); } } // direct handler too; showPanel ignores the duplicate
     const sb = $('#is_show_btn'); if (sb && !sb.dataset.bound) { sb.dataset.bound = 1; sb.checked = S().showButton; sb.addEventListener('change', () => { S().showButton = sb.checked; save(); applyUI(); }); }
   }
   function setupEntryPoints() {
     // Delegated on document, so it keeps working if SillyTavern rebuilds those menus. Touch: if no click arrives, fall back to pointerup.
-    let clickAt = 0; const sel = '#is_menu_item, #is_open_btn, #is_dock_btn';
-    document.addEventListener('click', e => { const el = e.target.closest?.(sel); if (el) { clickAt = Date.now(); showPanel(el.id === 'is_dock_btn'); } }, true);
-    document.addEventListener('pointerup', e => { const el = e.target.closest?.(sel); if (e.pointerType === 'mouse' || !el) return; const t0 = Date.now(); setTimeout(() => { if (clickAt < t0) showPanel(el.id === 'is_dock_btn'); }, 450); }, true);
+    let clickAt = 0; const sel = '#is_menu_item, #is_open_btn';
+    document.addEventListener('click', e => { const el = e.target.closest?.(sel); if (el) { clickAt = Date.now(); showPanel(); } }, true);
+    document.addEventListener('pointerup', e => { const el = e.target.closest?.(sel); if (e.pointerType === 'mouse' || !el) return; const t0 = Date.now(); setTimeout(() => { if (clickAt < t0) showPanel(); }, 450); }, true);
     // The menus may not exist yet (or be rebuilt) on slow phones: keep checking, cheaply.
     let timer = 0; const check = () => { timer = 0; guard('menu', mountMenus); };
     new MutationObserver(() => { if (!timer) timer = setTimeout(check, 300); }).observe(document.body, { childList: true, subtree: true });
