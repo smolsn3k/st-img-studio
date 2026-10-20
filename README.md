@@ -1,5 +1,7 @@
 # 🎨 Image Studio
 
+🇷🇺 [Русская версия](README.ru.md)
+
 A SillyTavern extension for generating images **on demand, from its own panel**. Nothing is ever posted to the chat. It reuses the connections you already set up in **sillyimages** or **SLAY Images**, or runs on its own connection.
 
 Works on desktop and mobile (bottom sheet on phones, movable window on desktop).
@@ -10,8 +12,9 @@ Works on desktop and mobile (bottom sheet on phones, movable window on desktop).
 - **Prompt with swappable `{tags}`.** Write `1girl, {style}, {quality}` and change each part from a field.
 - **Character references (up to 4).** Name them, then write `personA kissing personB`.
 - **Image, text, or both per reference.** Each character has its own text prompt and negative prompt.
-- **Pose reference.** A pose picture and/or the pose in words, with its own negative. Saved poses are reusable.
-- **Reference library.** Saved characters and poses you can reuse in any generation.
+- **Reference pictures with a purpose.** Take a pose, an art style, a composition, an outfit, a background, or a whole picture to recreate with your own characters. Link each one to your prompt with a `{tag}`.
+- **Reference library.** Saved characters and reference pictures you can reuse in any generation.
+- **English and Russian interface** (Auto, English or Русский).
 - **Image library.** Save a result together with the prompt, variables, model and references that made it.
 - **SLAY style button** that opens SLAY Images' own style gallery.
 - **Movable floating button, opacity slider, collapsible panel.**
@@ -99,7 +102,7 @@ Up to **4 characters** per image. Add them on the Create tab with **＋ Add char
 - **Image + text:** the picture usually wins if it disagrees with the text. Use **Text only** when the text must decide the look.
 - **See what was sent:** "Final prompt preview" shows it before you generate, and **Prompt that was sent** under each result shows it afterwards.
 - **Text-only characters** (no picture) can be created on the Refs tab with **＋ New text-only character**.
-- **Use as reference** on a result or a library image adds it as a reference, to keep a character consistent.
+- **Use as character** on a result or a library image adds it as a character, to keep a character consistent.
 - The **Send** checkbox turns all references off without clearing the slots.
 
 Notes:
@@ -107,18 +110,41 @@ Notes:
 - Models that accept fewer than 4 reference images use the first ones and tell you.
 - Pictures are shrunk to 1024px and sent as PNG.
 
-## Pose reference
+## Reference pictures
 
-One pose per image, set on the Create tab under **Pose reference** (**＋ Add pose reference**, then pick a saved pose or upload one). Saved poses live on the **Refs** tab under **Poses**.
+Up to **3 reference pictures** per image, set on the Create tab under **Reference pictures** (**＋ Add reference picture**, then pick a saved one or upload one). Saved ones live on the **Refs** tab under **References**.
 
-- **Picture:** a photo, stick figure, mannequin or openpose image. It is sent with an instruction to copy **only** the body pose, limb placement and camera angle, and to ignore the person, face, clothing and background in it.
-- **Text:** the pose in words (`sitting cross-legged, looking over shoulder, hand on cheek`), plus an optional **negative** for the pose (`crossed arms`).
-- **Send as:** **Image + text**, **Image only** or **Text only**, same as characters. Text-only poses need no picture (**＋ New text-only pose** on the Refs tab).
-- **Where the text goes:** Gemini, OpenAI-style, Naistera and SLAY get a `Pose: …` line at the end of the prompt. NovelAI gets the pose text appended to the base prompt as tags, and its negative is added to the negative prompt.
-- **Image limits:** the pose picture counts toward the model's reference-image limit, after your characters. If the limit is reached, the picture is skipped (you get a notice) and its text is still used.
-- **NovelAI** can't take reference images, so only the pose text is used.
-- **Use as pose** on a result or a library image turns it into the pose reference.
-- The **Send** checkbox next to Pose reference turns the pose off without removing it. Saved library entries remember their pose, and export/import carries it along.
+Every reference picture has a **purpose**, so the model knows what to take from it and what to ignore:
+
+| Purpose | What is taken |
+| --- | --- |
+| **Pose** | The body pose, limb placement and camera angle. Not the person, clothes or background. |
+| **Art style** | The art style, colors, lighting and rendering. Not its subjects. |
+| **Composition** | The layout, framing, camera angle and perspective. |
+| **Outfit** | The clothing and accessories. Not the person or pose. |
+| **Background** | The setting. Not any people. |
+| **Whole picture (recreate it)** | Everything: composition, pose, style and mood, but with **your characters** instead of its subjects. Use it for "make a picture like this one, with my character". |
+
+**Linking it to your prompt with a `{tag}`.** Each reference picture has a tag name (shown as `{pose}`, `{artstyle}`, `{like}`…; you can rename it). Tap its chip above the prompt, or type it, for example:
+
+```
+personA sitting at a cafe, in {pose}, drawn in {artstyle}
+```
+
+Image Studio turns each tag into a clear instruction pointing at that picture ("the pose from reference image “pose”"), and tells the model which image is which. If you don't write the tag, the instruction is added at the end of the prompt for you, so a reference is never ignored. Tags can use any letters, including Russian.
+
+- **Text:** each reference can also have words (`sitting cross-legged, looking over her shoulder`) and a **negative** (`crossed arms`). With a tag, the words are written in next to the instruction.
+- **Send as:** **Image + text**, **Image only** or **Text only**, same as characters. Text-only references need no picture (**＋ New text-only reference** on the Refs tab); the tag is then replaced by your words.
+- **Several at once:** for example a pose reference and an art-style reference together, each with its own tag.
+- **Image limits:** reference pictures count toward the model's reference-image limit, after your characters. If the limit is reached, the extra picture is skipped (you get a notice) and its text is still used.
+- **NovelAI** can't take reference images, so only the text is used (the tag is replaced by the words, and the negative joins the negative prompt).
+- **Use as reference picture** on a result or a library image turns it into a reference. **Use as character** turns it into a character.
+- The **Send** checkbox next to Reference pictures turns them all off without removing them. Saved library entries remember their reference pictures, and export/import carries them along.
+- Pose references from earlier versions are converted automatically (purpose: Pose).
+
+## Language
+
+**Setup → Language:** **Auto** follows SillyTavern's language, or choose **English** / **Русский**. Only the Image Studio interface and its messages change. Your prompts, names and saved items are never translated, and the text sent to the image models stays in English.
 
 ## Libraries
 
@@ -127,13 +153,13 @@ Both are stored in your **browser's storage** (IndexedDB), so they are per devic
 - **Library tab:** saved results with search. Tap one to open it:
   - **Name**, **Prompt (with {tags})** and **Negative** are editable. **Save changes** keeps your edits.
   - **Use this prompt** restores the template, negative prompt, variable values, generator, profile, model and references (variables you already have keep their saved options).
-  - **Full size**, **Download**, **Use as reference**, **Export** (this one item) and **Delete**.
+  - **Full size**, **Download**, **Use as character**, **Use as reference picture**, **Export** (this one item) and **Delete**.
   - An optional **auto-save** is on the Setup tab.
 - **Export / import:** the buttons at the top of the Library tab.
   - **Export prompts** writes a small `.json` file with prompts, variables, models and character info, without pictures.
   - **Export + images** also includes the pictures (the file can get large).
   - **Import from file** adds the entries from a file made by Image Studio. Entries you already have are skipped. Prompt-only entries show a "T" placeholder and work like any other: open one and tap **Use this prompt**. Characters used by imported entries are added to the Refs tab too.
-- **Refs tab:** saved characters and poses (switch with **Characters / Poses**), each with name, text prompt, negative prompt and send mode.
+- **Refs tab:** saved characters and reference pictures (switch with **Characters / References**). Characters have a name, text prompt, negative prompt and send mode; reference pictures also have a purpose and a tag name.
 
 ## Interface
 
